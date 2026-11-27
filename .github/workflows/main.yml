@@ -1,8 +1,3 @@
-Set-Location 'C:\Users\faste\OneDrive\Documents\ChatGPT\RaRRcord\RaRRcord'
-
-New-Item -ItemType Directory -Force '.github\workflows' | Out-Null
-
-@'
 name: Tests
 
 on:
@@ -34,8 +29,3 @@ jobs:
 
       - name: Run tests
         run: node --experimental-transform-types --test tests/*.test.mjs
-'@ | Set-Content '.github\workflows\tests.yml' -Encoding utf8
-
-git add -- .github/workflows/tests.yml
-git commit -m "ci: add automated GitHub tests" -- .github/workflows/tests.yml
-git push origin main
