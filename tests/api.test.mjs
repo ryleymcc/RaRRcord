@@ -33,7 +33,7 @@ function fixture() {
   const env={DB,BUCKET,RARRCORD_OWNER_EMAIL:"owner@example.test"};
   function visitor(id,email=id+"@example.test") {
     let cookie="";
-    return async (path,{input,expect=200,otherOrigin,keepCookie=true}={})=>{
+    return async (path,{input,expect=200,otherOrigin,keepCookie=true,contentType}={})=>{
       const headers=new Headers();
       if(id){headers.set("oai-authenticated-user-id",id);headers.set("oai-authenticated-user-email",email);}
       if(cookie&&keepCookie)headers.set("cookie",cookie);
@@ -43,6 +43,7 @@ function fixture() {
       }
       const result=await api(new Request(origin+"/api/ra/"+path,{method:input===undefined?"GET":"POST",headers,
         body:input===undefined||input instanceof FormData?input:JSON.stringify(input)}),env);
+      if(contentType)assert.equal(result.headers.get("content-type"),contentType);
       const received=result.headers.get("set-cookie");
       if(received){
         assert.match(received,/HttpOnly; Secure; SameSite=Strict/);
@@ -123,4 +124,69 @@ test("message changes, private uploads and voice signaling stay inside authorize
   await owner("admin",{input:{action:"disconnect",target:"member"}});
   assert.equal((await second("poll?peer="+peer2)).voice.length,1);
   assert.equal((await member("poll?peer="+peer)).voice,null);
+});
+
+test("voice sidechat persists and shares the room's permissions and polling with voice",async()=>{
+  const {visitor}=fixture();
+  const owner=visitor("owner"), member=visitor("member"), blocked=visitor("blocked");
+  await owner("enroll",{input:{username:"owner"}});
+  for(const [id,client] of [["member",member],["blocked",blocked]]){
+    await client("enroll",{input:{username:id}});
+    await owner("admin",{input:{action:"account",target:id,state:"approved",role:"member"}});
+    await client("enroll",{input:{}});
+  }
+  const {id:room}=await owner("admin",{input:{action:"channel",server:"community",name:"Role voice",kind:"voice",permission:"member"}});
+  assert.ok(room);
+  const {id:restricted}=await owner("admin",{input:{action:"channel",server:"community",name:"Restricted voice",kind:"voice",permission:"staff"}});
+  const peer=crypto.randomUUID();
+  await member("voice",{input:{action:"join",channel:room,peer}});
+  await member("voice",{input:{channel:room,peer,screen:true}});
+  const before=await member("history?channel="+room);
+  await owner("message",{input:{channel:room,text:"Welcome 👩‍💻"}});
+  const live=await member("poll?channel="+room+"&after="+before.cursor+"&peer="+peer);
+  assert.equal(live.messages[0].body,"Welcome 👩‍💻");
+  assert.equal(live.voice[0].screen,1);
+  const mid=live.messages[0].id;
+  await member("message",{input:{channel:room,id:mid,action:"react",emoji:"👍🏽"}});
+  const reacted=await member("poll?channel="+room+"&after="+live.cursor);
+  assert.deepEqual(JSON.parse(reacted.messages[0].reactions),{"👍🏽":1});
+  assert.deepEqual(JSON.parse(reacted.messages[0].my_reactions),["👍🏽"]);
+  assert.deepEqual(JSON.parse((await owner("history?channel="+room)).messages[0].my_reactions),[]);
+  await member("message",{input:{channel:room,id:mid,action:"react",emoji:"👍👍"},expect:400});
+  await member("message",{input:{channel:room,id:mid,action:"react",emoji:"👍🏽",remove:true}});
+  assert.deepEqual(JSON.parse((await owner("history?channel="+room)).messages[0].reactions),{});
+  await member("message",{input:{channel:"gaming",id:mid,action:"react",emoji:"🎉"},expect:404});
+  await blocked("history?channel="+restricted,{expect:404});
+  await blocked("poll?channel="+restricted,{expect:404});
+  await blocked("message",{input:{channel:restricted,text:"No access"},expect:404});
+  await blocked("typing",{input:{channel:restricted},expect:404});
+
+  const image=Buffer.from("47494638396101000100800000ffffff000000","hex");
+  const frame=Buffer.from("21f904000a0000002c0000000001000100000202440100","hex");
+  const gif=Buffer.concat([image,frame,frame,Buffer.from([0x3b])]);
+  const form=new FormData();
+  form.set("gif","1");
+  form.set("file",new File([gif],"clipboard-image"));
+  form.set("channel",restricted);
+  await blocked("upload",{input:form,expect:404});
+  form.set("reply",String(mid));
+  await owner("upload",{input:form,expect:404});
+  form.set("channel",room);
+  form.set("text","Animated reply ✨");
+  await member("upload",{input:form});
+  await member("voice",{input:{action:"leave",channel:room,peer}});
+  const history=await owner("history?channel="+room);
+  const attachment=history.messages[1];
+  assert.equal(attachment.body,"Animated reply ✨");
+  assert.equal(attachment.filename,"clipboard-image.gif");
+  assert.equal(attachment.reply,mid);
+  assert.deepEqual(Buffer.from(await member("attachment?key="+attachment.attachment,{contentType:"image/gif"})),gif);
+  await owner("admin",{input:{action:"channel",target:room,server:"community",name:"Role voice",kind:"voice",permission:"staff"}});
+  await member("attachment?key="+attachment.attachment,{expect:404});
+  await member("history?channel="+room,{expect:404});
+  assert.deepEqual((await member("history?channel=gaming")).messages,[]);
+  form.set("channel","gaming");
+  form.delete("reply");
+  form.set("file",new File(["not a gif"],"fake.gif"));
+  await member("upload",{input:form,expect:415});
 });

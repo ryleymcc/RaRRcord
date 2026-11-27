@@ -12,12 +12,13 @@ type Link={
   watching:Set<Medium>; incoming:Map<string,MediaStream>; labels:Record<string,Medium>;
   speaking:boolean; previous:Map<string,Record<string,number>>; retry:number;
 };
-export type Metrics={name:string; connection:string; ice:string; gathering:string; direction:string; codec?:string; resolution?:string; fps?:number; bitrate?:number; targetBitrate?:number; rtt?:number; loss?:number; jitter?:number; dropped?:number; encoded?:number; decoded?:number; encodeMs?:number; decodeMs?:number; available?:number; limited?:string; route?:string};
+export type Metrics={peer:string; stream?:string; name:string; connection:string; ice:string; gathering:string; direction:string; codec?:string; resolution?:string; fps?:number; bitrate?:number; targetBitrate?:number; rtt?:number; loss?:number; jitter?:number; dropped?:number; encoded?:number; decoded?:number; encodeMs?:number; decodeMs?:number; available?:number; limited?:string; route?:string};
 
 export function codecs() {
   return [...new Set(RTCRtpSender.getCapabilities?.("video")?.codecs.map(c=>c.mimeType.split("/")[1]).filter(c=>["H264","VP8","VP9","AV1"].includes(c))??[])];
 }
 export class Call {
+  private static microphoneCapture=Promise.resolve();
   channel:string;
   peer=crypto.randomUUID();
   signal=0;
@@ -210,14 +211,34 @@ export class Call {
   }
   watching(peer:string,medium:Medium){return !!this.links.get(peer)?.watching.has(medium);}
   speaking(peer:string){return peer===this.peer?this.localSpeaking:!!this.links.get(peer)?.speaking;}
+  get microphonePending(){return this.starting.has("voice");}
+  get microphoneActive(){return !this.muted&&!this.deaf&&(this.local.get("voice")?.getAudioTracks().some(track=>track.readyState==="live")??false);}
   setMuted(value:boolean){this.muted=value;this.micState();this.changed();}
-  setDeaf(value:boolean){this.deaf=value;this.changed();}
+  setDeaf(value:boolean){this.deaf=value;this.micState();this.changed();}
   private micState(){for(const track of this.local.get("voice")?.getTracks()??[])track.enabled=!this.muted&&!this.deaf&&(!this.prefs.ptt||this.pressed);}
+  startMicrophone(){
+    if(this.closed || this.microphonePending || this.local.has("voice"))return Promise.resolve();
+    this.starting.add("voice");
+    // A browser permission prompt can outlive the call that opened it.
+    const capture=Call.microphoneCapture.then(()=>this.capture("voice"));
+    Call.microphoneCapture=capture.catch(()=>{});
+    return capture;
+  }
+  async toggleMicrophone(){
+    if(this.deaf || this.microphonePending || this.closed)return;
+    this.setMuted(this.microphoneActive);
+    if(!this.muted)await this.startMicrophone();
+  }
   async toggle(kind:Medium) {
     if(this.starting.has(kind) || this.closed)return;
     if(this.local.has(kind)){await this.stop(kind);return;}
+    if(kind==="voice"){await this.toggleMicrophone();return;}
     this.starting.add(kind);
+    await this.capture(kind);
+  }
+  private async capture(kind:Medium) {
     try{
+      if(this.closed)return;
       const prefs=this.prefs;
       const screen=screenShareSettings(prefs,this.screenBitrateLimit);
       const capture=navigator.mediaDevices;
@@ -228,6 +249,10 @@ export class Call {
       const screenTrack=kind==="screen"?stream.getVideoTracks()[0]:undefined;
       if(screenTrack && screen.maximum)await useNativeCapture(screenTrack).catch(()=>{});
       if(this.closed){stream.getTracks().forEach(track=>track.stop());return;}
+      if(kind==="voice" && !stream.getAudioTracks().some(track=>track.readyState==="live")){
+        stream.getTracks().forEach(track=>track.stop());
+        throw new Error("No working microphone was found. Check your input device in User settings.");
+      }
       this.local.set(kind,stream);
       for(const track of stream.getTracks()) {
         if(track.kind==="video")track.contentHint=kind==="screen"?screen.hint:"motion";
@@ -236,10 +261,15 @@ export class Call {
       this.micState();
       if(kind==="voice")this.meterVoice(stream);
       for(const link of this.links.values())this.publish(link,kind);
-      await this.announce();
+      if(kind!=="voice")await this.announce();
     }catch(error){
-      this.error(error instanceof DOMException && error.name==="NotAllowedError"?"Capture permission was declined or blocked. Check your browser’s site permissions.":error instanceof Error?error.message:"Could not start capture.");
-    }finally{this.starting.delete(kind);this.changed();}
+      if(this.closed)return;
+      if(kind==="voice" && this.local.has(kind))await this.stop(kind);
+      const name=error instanceof DOMException?error.name:"";
+      if(name==="NotAllowedError")this.error("Capture permission was declined or blocked. Check your browser’s site permissions.");
+      else if(kind==="voice" && (name==="NotFoundError" || name==="OverconstrainedError"))this.error("The selected microphone is unavailable. Check your input device in User settings.");
+      else this.error(error instanceof Error?error.message:"Could not start capture.");
+    }finally{this.starting.delete(kind);if(!this.closed)this.changed();}
   }
   private async stop(kind:Medium) {
     const stream=this.local.get(kind);
@@ -247,7 +277,7 @@ export class Call {
     stream?.getTracks().forEach(track=>track.stop());
     if(kind==="voice")this.stopMeter();
     for(const link of this.links.values())this.publish(link,kind);
-    await this.announce();
+    if(kind!=="voice")await this.announce();
     this.changed();
   }
   private announce(){return request("voice",{action:"media",channel:this.channel,peer:this.peer,cam:this.local.has("cam"),screen:this.local.has("screen")}).catch(e=>this.error(e.message));}
@@ -289,7 +319,7 @@ export class Call {
       const transport=rows.find(s=>s.type==="transport");
       const pair=rows.find(s=>s.id===transport?.selectedCandidatePairId)??rows.find(s=>s.type==="candidate-pair"&&s.nominated&&s.state==="succeeded");
       const route=[pair?.localCandidateId,pair?.remoteCandidateId].map(id=>rows.find(s=>s.id===id)?.candidateType);
-      const base={name:link.remote.name,connection:link.pc.connectionState,ice:link.pc.iceConnectionState,gathering:link.pc.iceGatheringState,
+      const base={peer:link.remote.peer,name:link.remote.name,connection:link.pc.connectionState,ice:link.pc.iceConnectionState,gathering:link.pc.iceGatheringState,
         route:pair?(route.includes("relay")?"Relayed":"Direct"):undefined,rtt:pair?.currentRoundTripTime===undefined?undefined:pair.currentRoundTripTime*1000,available:pair?.availableOutgoingBitrate===undefined?undefined:pair.availableOutgoingBitrate/1000};
       const streams=rows.filter(s=>s.type==="outbound-rtp"||s.type==="inbound-rtp");
       if(!streams.length)result.push({...base,direction:"Waiting for media"});
@@ -306,7 +336,7 @@ export class Call {
         const time=s.totalEncodeTime??s.totalDecodeTime;
         const timeDelta=before?delta(time,before.time):undefined;
         link.previous.set(s.id,{at,bytes,frames,lost,time,packets:s.packetsReceived});
-        result.push({...base,direction:(out?"Sending ":"Receiving ")+(s.kind??"media"),
+        result.push({...base,stream:s.id,direction:(out?"Sending ":"Receiving ")+(s.kind??"media"),
           codec:rows.find(x=>x.id===s.codecId)?.mimeType,resolution:s.frameWidth&&s.frameHeight?s.frameWidth+"×"+s.frameHeight:undefined,
           fps:frameDelta===undefined?undefined:frameDelta/elapsed,bitrate:byteDelta===undefined?undefined:8*byteDelta/elapsed/1000,
           targetBitrate:typeof s.targetBitrate==="number"?s.targetBitrate/1000:undefined,
@@ -329,5 +359,51 @@ export class Call {
     for(const link of this.links.values())link.pc.close();
     this.links.clear();this.local.clear();
     void request("voice",{action:"leave",channel:this.channel,peer:this.peer}).catch(()=>{});
+  }
+}
+
+export class VoiceSession {
+  call:Call|null=null;
+  private target:{channel:string}|null=null;
+  private joining=Promise.resolve();
+  constructor(private changed:(call:Call|null)=>void,private updated:()=>void,private error:(message:string)=>void){}
+
+  join(channel:string,prefs:Preferences,limit:number){
+    if(this.target?.channel===channel)return this.joining;
+    if(this.call?.channel===channel){this.target=null;return this.joining;}
+    if(typeof RTCPeerConnection==="undefined"){this.error("WebRTC is unavailable in this browser.");return Promise.resolve();}
+    const target={channel};
+    this.target=target;
+    // The server stores one room per user, so join requests must arrive in order.
+    this.joining=this.joining.then(async()=>{
+      try{
+        if(this.target!==target)return;
+        const ice=await request<{servers:RTCIceServer[]}>("ice");
+        if(this.target!==target)return;
+        this.closeCall();
+        const call=new Call(channel,prefs,limit,ice.servers,this.updated,this.error);
+        try{
+          await request("voice",{action:"join",channel,peer:call.peer});
+          if(this.target!==target){call.close();return;}
+        }catch(error){call.close();throw error;}
+        this.call=call;
+        this.changed(call);
+        void call.startMicrophone();
+      }catch(error){
+        if(this.target===target)this.error(error instanceof Error?error.message:"Could not join the voice room.");
+      }finally{if(this.target===target)this.target=null;}
+    });
+    return this.joining;
+  }
+
+  disconnect(){this.target=null;this.closeCall();}
+
+  ended(call:Call){if(this.call===call)this.closeCall();}
+
+  private closeCall(){
+    if(!this.call)return;
+    this.call.close();
+    this.call=null;
+    this.changed(null);
   }
 }
