@@ -24,7 +24,7 @@ export const messages = table("messages", {
   id: integer().primaryKey({autoIncrement:true}), channel:text().notNull(), uid:text().notNull(),
   body:text().notNull(), attachment:text(), filename:text(), reply:integer(),
   created:integer().notNull(), edited:integer(), deleted:integer().notNull().default(0), pinned:integer().notNull().default(0),
-}, t => [index("message_history").on(t.channel,t.id)]);
+}, t => [index("message_history").on(t.channel,t.id),index("message_attachment").on(t.attachment)]);
 export const reactions = table("reactions", { mid:integer().notNull(), uid:text().notNull(), emoji:text().notNull() },
   t=>[primaryKey({columns:[t.mid,t.uid,t.emoji]})]);
 export const events = table("events", { id:integer().primaryKey({autoIncrement:true}), channel:text().notNull(), mid:integer().notNull(), time:integer().notNull() },

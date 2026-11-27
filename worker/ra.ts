@@ -71,9 +71,14 @@ async function route(request:Request, env:Cloudflare.Env):Promise<Response> {
   const run=(query:string,...values:Value[])=>sql(query,...values).run();
   const one=<T>(query:string,...values:Value[])=>sql(query,...values).first<T>();
   const all=async <T>(query:string,...values:Value[])=>(await sql(query,...values).all<T>()).results;
+  // Runs several statements in one round trip and returns each one's rows.
+  const many=async (statements:D1PreparedStatement[])=>(await db.batch(statements)).map(result=>result.results as Record<string,unknown>[]);
   const rawSession=(request.headers.get("cookie")??"").match(/(?:^|;\s*)__Host-rarr=([a-f0-9]{64})(?:;|$)/)?.[1];
   const sessionKey=rawSession ? await digest(rawSession) : "";
-  let user=await one<User>("SELECT * FROM users WHERE id=?",id);
+  // One round trip for the account and whether this request's session is still live.
+  const signedIn=await one<User & {live:number}>("SELECT u.*,EXISTS (SELECT 1 FROM sessions s WHERE s.token=? AND s.uid=u.id AND s.epoch=u.epoch AND s.expires>?) AS live FROM users u WHERE u.id=?",sessionKey,now,id);
+  let user:User|null=signedIn;
+  const live=!!sessionKey && !!signedIn?.live;
   const validSession=async (account:User)=> !!sessionKey && !!await one(
     "SELECT token FROM sessions WHERE token=? AND uid=? AND epoch=? AND expires>?",sessionKey,id,account.epoch,now);
   const audit=(action:string, detail:string)=>sql("INSERT INTO audit(uid,action,detail,time) VALUES(?,?,?,?)",id,action,detail,now);
@@ -89,7 +94,7 @@ async function route(request:Request, env:Cloudflare.Env):Promise<Response> {
     if (!body || Array.isArray(body) || typeof body!=="object") deny(400,"Expected an object.");
   }
   if (path==="session" && !write) {
-    return json({user:user?view(user):null, active:user?.state==="approved" && await validSession(user),
+    return json({user:user?view(user):null, active:user?.state==="approved" && live,
       ownerConfigured:!!env.RARRCORD_OWNER_EMAIL, nativeIdentity:true});
   }
   if (path==="enroll" && write) {
@@ -136,7 +141,7 @@ async function route(request:Request, env:Cloudflare.Env):Promise<Response> {
     if (user) await run("DELETE FROM voice WHERE uid=?",id);
     return json({},200,{"set-cookie":cookie("",0)});
   }
-  if (!user || user.state!=="approved" || !await validSession(user)) deny(403,"Your RaRRcord session does not have access.");
+  if (!user || user.state!=="approved" || !live) deny(403,"Your RaRRcord session does not have access.");
   const account=user;
   const access:Value[]=[id,account.role,id];
   const admin=account.role==="admin";
@@ -158,9 +163,10 @@ async function route(request:Request, env:Cloudflare.Env):Promise<Response> {
     if (!row || row.hits>limit) deny(429,"Please slow down.");
   };
   const changed=(channel:string, mid:number)=>sql("INSERT INTO events(channel,mid,time) VALUES(?,?,?)",channel,mid,now);
-  async function readMessages(clause:string, args:Value[], order:string, limit:number) {
-    return all("SELECT m.*,u.name,u.username,u.avatar IS NOT NULL AS has_avatar,(SELECT json_group_object(emoji,count) FROM (SELECT emoji,COUNT(*) count FROM reactions WHERE mid=m.id GROUP BY emoji)) AS reactions,(SELECT json_group_array(emoji) FROM reactions WHERE mid=m.id AND uid=?) AS my_reactions FROM messages m JOIN users u ON u.id=m.uid WHERE "+clause+" ORDER BY "+order+" LIMIT ?",id,...args,limit);
-  }
+  const messageQuery=(clause:string, args:Value[], order:string, limit:number)=>
+    sql("SELECT m.*,u.name,u.username,u.avatar IS NOT NULL AS has_avatar,(SELECT json_group_object(emoji,count) FROM (SELECT emoji,COUNT(*) count FROM reactions WHERE mid=m.id GROUP BY emoji)) AS reactions,(SELECT json_group_array(emoji) FROM reactions WHERE mid=m.id AND uid=?) AS my_reactions FROM messages m JOIN users u ON u.id=m.uid WHERE "+clause+" ORDER BY "+order+" LIMIT ?",id,...args,limit);
+  const readMessages=async (clause:string, args:Value[], order:string, limit:number)=>
+    (await messageQuery(clause,args,order,limit).all()).results;
   if (path==="workspace" && !write) {
     return json({
       servers:await all("SELECT * FROM servers s WHERE ?='admin' OR EXISTS (SELECT 1 FROM members WHERE server=s.id AND uid=?) ORDER BY name",account.role,id),
@@ -180,31 +186,46 @@ async function route(request:Request, env:Cloudflare.Env):Promise<Response> {
     return json({messages:rows.reverse(),cursor:cursor?.id??0});
   }
   if (path==="poll" && !write) {
-    if (account.seen<now-9000) await run("UPDATE users SET seen=? WHERE id=?",now,id);
+    const seen=account.seen<now-9000 ? run("UPDATE users SET seen=? WHERE id=?",now,id) : null;
     const result:Record<string,unknown>={};
-    if (q.has("channel")) {
+    // The chat and voice halves are independent, so they run side by side, each in as few round trips as possible.
+    const chat=async ()=>{
+      if (!q.has("channel")) return;
       const c=await chan(cid());
       const after=number(q.get("after"));
-      const events=await all<{id:number;mid:number}>("SELECT id,mid FROM events WHERE channel=? AND id>? ORDER BY id LIMIT 95",c.id,after);
-      const ids=[...new Set(events.map(e=>e.mid))];
-      result.cursor=events.at(-1)?.id??after;
-      result.messages=ids.length?await readMessages("m.channel=? AND m.id IN ("+ids.map(()=>"?").join(",")+")",[c.id,...ids],"m.id",120):[];
-      result.typing=await all("SELECT u.name FROM typing t JOIN users u ON t.uid=u.id WHERE t.channel=? AND t.expires>? AND t.uid<>? AND u.state='approved'",c.id,now,id);
-    }
-    if (q.has("peer")) {
+      const [events,messages,typing]=await many([
+        sql("SELECT id,mid FROM events WHERE channel=? AND id>? ORDER BY id LIMIT 95",c.id,after),
+        messageQuery("m.channel=? AND m.id IN (SELECT mid FROM events WHERE channel=? AND id>? ORDER BY id LIMIT 95)",[c.id,c.id,after],"m.id",120),
+        sql("SELECT u.name FROM typing t JOIN users u ON t.uid=u.id WHERE t.channel=? AND t.expires>? AND t.uid<>? AND u.state='approved'",c.id,now,id),
+      ]);
+      result.cursor=(events.at(-1)?.id as number|undefined)??after;
+      result.messages=messages;
+      result.typing=typing;
+    };
+    const call=async ()=>{
+      if (!q.has("peer")) return;
       const peer=string(q.get("peer"),64);
-      const room=await one<Voice>("SELECT * FROM voice WHERE uid=? AND peer=? AND expires>?",id,peer,now);
+      // Only a room this account may still enter counts as joined.
+      const room=await one<Voice>("SELECT v.* FROM voice v JOIN channels c ON c.id=v.channel AND c.kind='voice' WHERE v.uid=? AND v.peer=? AND v.expires>? AND "+channelAccess("c"),id,peer,now,...access);
       result.voice=null;
-      if (room) {
-        const permitted=await one("SELECT c.id FROM channels c WHERE c.kind='voice' AND c.id=? AND "+channelAccess("c"),room.channel,...access);
-        if (permitted) {
-          await run("UPDATE voice SET expires=? WHERE uid=? AND peer=?",now+lease,id,peer);
-          // A just-joined sender must be visible in the roster for its signal to be processed.
-          result.signals=await all("SELECT id,sender,data FROM signals WHERE channel=? AND recipient=? AND id>? AND expires>? ORDER BY id LIMIT 100",room.channel,peer,number(q.get("signal")),now);
-          result.voice=await all("SELECT v.peer,v.uid,v.cam,v.screen,u.name FROM voice v JOIN users u ON v.uid=u.id JOIN channels c ON v.channel=c.id WHERE v.channel=? AND v.expires>? AND u.state='approved' AND "+channelAccess("c").replace("ca.uid=?","ca.uid=v.uid").replace("?='admin'","u.role='admin'").replace("ma.uid=?","ma.uid=v.uid")+" AND NOT EXISTS (SELECT 1 FROM blocks b WHERE (b.uid=? AND b.blocked=v.uid) OR (b.uid=v.uid AND b.blocked=?))",room.channel,now,id,id);
-        }
-      }
-    }
+      if (!room) return;
+      const statements=[
+        // A just-joined sender must be visible in the roster for its signal to be processed.
+        sql("SELECT id,sender,data FROM signals WHERE channel=? AND recipient=? AND id>? AND expires>? ORDER BY id LIMIT 100",room.channel,peer,number(q.get("signal")),now),
+        sql("SELECT v.peer,v.uid,v.cam,v.screen,u.name FROM voice v JOIN users u ON v.uid=u.id JOIN channels c ON v.channel=c.id WHERE v.channel=? AND v.expires>? AND u.state='approved' AND "+channelAccess("c").replace("ca.uid=?","ca.uid=v.uid").replace("?='admin'","u.role='admin'").replace("ma.uid=?","ma.uid=v.uid")+" AND NOT EXISTS (SELECT 1 FROM blocks b WHERE (b.uid=? AND b.blocked=v.uid) OR (b.uid=v.uid AND b.blocked=?))",room.channel,now,id,id),
+      ];
+      // The lease lasts 16 s; renewing once it is under 10 s saves a write on most polls.
+      if (room.expires-now<lease-6000) statements.push(sql("UPDATE voice SET expires=? WHERE uid=? AND peer=?",now+lease,id,peer));
+      const [signals,roster]=await many(statements);
+      result.signals=signals;
+      result.voice=roster;
+    };
+    const rooms=async ()=>{
+      if (!q.has("rooms")) return;
+      // Everyone currently in a voice room this viewer can see, for the channel sidebar.
+      result.rooms=await all("SELECT v.channel,v.uid,u.name,u.avatar IS NOT NULL AS has_avatar,v.cam,v.screen FROM voice v JOIN users u ON v.uid=u.id JOIN channels c ON v.channel=c.id WHERE v.expires>? AND u.state='approved' AND c.kind='voice' AND "+channelAccess("c")+" AND "+channelAccess("c").replace("ca.uid=?","ca.uid=v.uid").replace("?='admin'","u.role='admin'").replace("ma.uid=?","ma.uid=v.uid")+" AND NOT EXISTS (SELECT 1 FROM blocks b WHERE (b.uid=? AND b.blocked=v.uid) OR (b.uid=v.uid AND b.blocked=?)) ORDER BY u.name",now,...access,id,id);
+    };
+    await Promise.all([seen,chat(),call(),rooms()]);
     return json(result);
   }
   if (path==="ice" && !write) {
@@ -247,10 +268,15 @@ async function route(request:Request, env:Cloudflare.Env):Promise<Response> {
       if (!row?.avatar) deny(404,"Avatar unavailable.");
       storageKey=row.avatar;
     }
+    // Storage keys are random and never reused, so the browser may keep a copy. Attachments never change;
+    // an avatar URL is per user, so it is rechecked after 5 minutes and answered with 304 when unchanged.
+    const etag='"'+storageKey+'"';
+    const caching={"cache-control":path==="attachment"?"private, max-age=31536000, immutable":"private, max-age=300","etag":etag,"x-content-type-options":"nosniff"};
+    if (request.headers.get("if-none-match")===etag) return new Response(null,{status:304,headers:caching});
     const object=await env.BUCKET.get(storageKey);
     if (!object) deny(404,"File unavailable.");
     const media=object.httpMetadata?.contentType ?? "application/octet-stream";
-    return new Response(object.body,{headers:{...authHeaders,"content-type":media,
+    return new Response(object.body,{headers:{...caching,"content-type":media,
       "content-disposition":(media.startsWith("image/") && !q.has("download")?"inline":"attachment")+"; filename*=UTF-8''"+encodeURIComponent(filename),
       "content-security-policy":"default-src 'none'; sandbox"}});
   }
@@ -294,7 +320,7 @@ async function route(request:Request, env:Cloudflare.Env):Promise<Response> {
     try {
       if (c) await db.batch([
         sql("INSERT INTO messages(channel,uid,body,attachment,filename,reply,created) VALUES(?,?,?,?,?,?,?)",c.id,id,caption,key,filename,reply,now),
-        sql("INSERT INTO events(channel,mid,time) SELECT channel,id,? FROM messages WHERE attachment=?",now,key),
+        sql("INSERT INTO events(channel,mid,time) VALUES(?,last_insert_rowid(),?)",c.id,now),
         sql("DELETE FROM typing WHERE channel=? AND uid=?",c.id,id),
       ]);
       else await run("UPDATE users SET avatar=? WHERE id=?",key,id);

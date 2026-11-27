@@ -1,6 +1,7 @@
 "use client";
-import { useCallback,useEffect,useRef,useState, type ClipboardEvent, type FormEvent, type ReactNode } from "react";
-import { AudioLines, Bell, Camera, ChevronDown, CircleHelp, Headphones, Hash, LockKeyhole, LogOut, Menu, MessageSquare, Mic, MicOff, MonitorUp, Paperclip, Plus, Search, Send, Settings, Shield, Smile, Users, X } from "lucide-react";
+import { Fragment,memo,useCallback,useEffect,useLayoutEffect,useRef,useState, type ClipboardEvent, type FormEvent, type ReactNode } from "react";
+import { AudioLines, Bell, Camera, ChevronDown, CircleHelp, Headphones, Hash, LockKeyhole, LogOut, Menu, MessageSquare, Mic, MicOff, MonitorUp, Paperclip, Plus, Search, Send, Settings, Shield, Smile, Users, Video, X } from "lucide-react";
+import { playVoiceCue } from "./voice-sounds";
 import { VoiceSession, codecs, type Call, type Feed, type Metrics, type Participant, type Signal } from "./rtc";
 import { request, defaults, qualities, type Channel, type Message, type Person, type Preferences, type Server } from "./ra-client";
 import Admin from "./ra-admin";
@@ -11,7 +12,8 @@ import EmojiPicker from "./emoji-picker";
 type Workspace={servers:Server[]; channels:Channel[]; people:Person[]; settings:{key:string;value:string}[];prefs:Partial<Preferences>};
 type Auth={user:Person|null;active:boolean;ownerConfigured?:boolean};
 type History={messages:Message[];cursor:number};
-type Update={messages?:Message[];cursor?:number;typing?:{name:string}[];voice?:Participant[]|null;signals?:Signal[]};
+type RoomMember={channel:string;uid:string;name:string;has_avatar:boolean;cam:number;screen:number};
+type Update={messages?:Message[];cursor?:number;typing?:{name:string}[];voice?:Participant[]|null;signals?:Signal[];rooms?:RoomMember[]};
 const day=(v:number)=>new Date(v).toLocaleDateString(undefined,{weekday:"long",month:"long",day:"numeric"});
 const clock=(v:number)=>new Date(v).toLocaleTimeString(undefined,{hour:"numeric",minute:"2-digit"});
 const initials=(s:string)=>s.trim().split(/\s+/).slice(0,2).map(x=>x[0]).join("").toUpperCase();
@@ -20,6 +22,41 @@ function Avatar({name,uid,has,status}:{name:string;uid:string;has?:boolean;statu
   const color=[...uid].reduce((sum,c)=>sum+c.charCodeAt(0),0)%6;
   return <span className={"avatar hue-"+color}>{has?<img src={avatarUrl(uid)} alt=""/>:initials(name)}{status&&<i className={"presence "+status} title={status}/>}</span>;
 }
+type VoiceMember={uid:string;name:string;avatar:boolean;live:boolean;cam:boolean;speaking:boolean};
+function VoiceMembers({members}:{members:VoiceMember[]}){
+  if(!members.length)return null;
+  return <ul className="voice-members" aria-label="In this voice room">{members.map(m=><li key={m.uid} className={m.speaking?"speaking":""}>
+    <Avatar name={m.name} uid={m.uid} has={m.avatar}/><span>{m.name}</span>{m.cam&&<Video size={13} aria-label="Camera on"/>}{m.live&&<b className="live-tag">LIVE</b>}
+  </li>)}</ul>;
+}
+type RowActions={action:(kind:string,m:Message,extra?:object)=>Promise<void>;reply:(m:Message)=>void;pick:(m:Message)=>void;edit:(m:Message)=>void};
+// A row only re-renders when its message, its neighbour or the viewer changes, not on every poll.
+const MessageRow=memo(function MessageRow({m,previous,replyName,me,admin,actions}:{m:Message;previous?:Message;replyName?:string;me?:string;admin:boolean;actions:RowActions}){
+  const newDay=!previous||day(previous.created)!==day(m.created);
+  const joined=!!previous&&!newDay&&previous.uid===m.uid&&m.created-previous.created<240000;
+  const reacts=Object.entries(m.reactions?JSON.parse(m.reactions) as Record<string,number>:{});
+  const mine=new Set<string>(m.my_reactions?JSON.parse(m.my_reactions):[]);
+  return <div className="message-row" style={{containIntrinsicSize:joined?"auto 28px":"auto 72px"}}>
+    {newDay&&<div className="date-divider"><span>{day(m.created)}</span></div>}
+    <article className={"message "+(joined?"joined":"")} aria-label={"Message by "+m.name}>
+      {!joined&&<Avatar name={m.name} uid={m.uid} has={m.has_avatar}/>}
+      <div className="message-content">
+        {m.reply&&<span className="reply-label">Replying to {replyName??"an earlier message"}</span>}
+        {!joined&&<div className="byline"><strong>{m.name}</strong><time dateTime={new Date(m.created).toISOString()}>{clock(m.created)}</time>{!!m.pinned&&<span className="tag">Pinned</span>}</div>}
+        {m.body&&<div className="text-body">{markdown(m.body)}{m.edited&&<small> (edited)</small>}</div>}
+        {m.attachment&&<Attachment message={m}/>}
+        {reacts.length>0&&<div className="reaction-row">{reacts.map(([emoji,count])=><button key={emoji} type="button" aria-pressed={mine.has(emoji)} onClick={()=>void actions.action("react",m,{emoji,remove:mine.has(emoji)})}>{emoji} {count}</button>)}</div>}
+      </div>
+      <details className="message-menu"><summary aria-label="Message actions">•••</summary><div>
+        <button onClick={()=>actions.reply(m)}>Reply</button>
+        <button onClick={event=>{event.currentTarget.closest("details")?.removeAttribute("open");actions.pick(m);}}>Add reaction</button>
+        {me===m.uid&&m.body&&<button onClick={()=>actions.edit(m)}>Edit</button>}
+        {(me===m.uid||admin)&&<><button onClick={()=>void actions.action("pin",m)}>{m.pinned?"Unpin":"Pin"}</button><button className="danger" onClick={()=>{if(confirm("Delete this message?"))void actions.action("delete",m);}}>Delete</button></>}
+        {me!==m.uid&&<button onClick={()=>{const reason=prompt("Why are you reporting this message?");if(reason)void actions.action("report",m,{reason});}}>Report</button>}
+      </div></details>
+    </article>
+  </div>;
+});
 function IconButton({label,children,onClick,active=false,disabled=false}:{label:string;children:ReactNode;onClick:()=>void;active?:boolean;disabled?:boolean}){
   return <button type="button" className={"icon-button"+(active?" active":"")} title={label} aria-label={label} aria-pressed={active} onClick={onClick} disabled={disabled}>{children}</button>;
 }
@@ -164,6 +201,7 @@ function UserSettings({person,prefs,limit,save,report}:{person:Person;prefs:Pref
     </fieldset>
     <fieldset><legend>Appearance and notifications</legend><label className="inline"><input type="checkbox" checked={form.compact} onChange={e=>change("compact",e.target.checked)}/>Compact messages</label>
       <label className="inline"><input type="checkbox" checked={form.notifications} onChange={async e=>{const want=e.target.checked;change("notifications",want&&"Notification" in window&&(await Notification.requestPermission())==="granted");}}/>Browser mention notifications</label>
+      <label className="inline"><input type="checkbox" checked={form.voiceSounds!==false} onChange={e=>change("voiceSounds",e.target.checked)}/>Voice join and leave sounds</label>
     </fieldset>
     <div className="inline"><button className="primary">Save settings</button><a href="/privacy">Privacy</a></div>
   </form>;
@@ -185,12 +223,17 @@ export default function Community(){
   const [find,setFind]=useState("");
   const [pinned,setPinned]=useState(false);
   const [modal,setModal]=useState("");
+  const modalRef=useRef(modal);
+  useEffect(()=>{modalRef.current=modal;},[modal]);
   const [toast,setToast]=useState("");
   const [members,setMembers]=useState(true);
   const [mobile,setMobile]=useState(false);
   const [call,setCall]=useState<Call|null>(null);
   const [latency,setLatency]=useState<number|null>(null);
   const [,refreshCall]=useState(0);
+  const [rooms,setRooms]=useState<RoomMember[]>([]);
+  const roomsAt=useRef(0);
+  const cueState=useRef<{call:Call|null;uids:Set<string>|null}>({call:null,uids:null});
   const [volumes,setVolumes]=useState<Record<string,number>>({});
   const [stage,setStage]=useState(false);
   const [speaker,setSpeaker]=useState(false);
@@ -204,6 +247,13 @@ export default function Community(){
   const cursor=useRef(0);
   const lastTyping=useRef(0);
   const stick=useRef(true);
+  const rowHandlers=useRef<RowActions>(null as unknown as RowActions);
+  const [rowActions]=useState<RowActions>(()=>({
+    action:(kind,m,extra)=>rowHandlers.current.action(kind,m,extra),
+    reply:m=>rowHandlers.current.reply(m),
+    pick:m=>rowHandlers.current.pick(m),
+    edit:m=>rowHandlers.current.edit(m),
+  }));
   const person=auth?.user;
   const channel=space?.channels.find(c=>c.id===selected);
   const mainStage=stage||channel?.kind==="voice";
@@ -258,11 +308,16 @@ export default function Community(){
       const liveCall=voice.call;
       if(ready===chatId&&chatId&&!find&&!pinned){params.set("channel",chatId);params.set("after",String(cursor.current));}
       if(liveCall){params.set("peer",liveCall.peer);params.set("signal",String(liveCall.signal));}
+      const wantRooms=Date.now()-roomsAt.current>1400;
+      if(wantRooms){params.set("rooms","1");roomsAt.current=Date.now();}
       const began=performance.now();
       try{
         const result=await request<Update>("poll?"+params);
         if(!active)return;
-        setLatency(performance.now()-began);
+        // Only Diagnostics shows latency, so other polls skip the re-render.
+        if(modalRef.current==="diagnostics")setLatency(performance.now()-began);
+        const nextRooms=result.rooms;
+        if(nextRooms)setRooms(previous=>JSON.stringify(previous)===JSON.stringify(nextRooms)?previous:nextRooms);
         if(params.has("channel")){
           cursor.current=result.cursor??cursor.current;
           setTyping(result.typing?.map(t=>t.name).join(", ")??"");
@@ -293,6 +348,27 @@ export default function Community(){
     return ()=>{active=false;clearTimeout(timer);};
   },[auth?.active,ready,chatId,find,pinned,chatChannel?.name,prefs.notifications,person?.id,person?.username,refreshAuth,report,call,voice]);
   useEffect(()=>()=>voice.disconnect(),[voice]);
+  const callUids=call?[...new Set(call.participants.map(p=>p.uid))].sort().join(","):"";
+  useEffect(()=>{
+    const state=cueState.current;
+    const output=prefs.output,enabled=prefs.voiceSounds!==false;
+    if(call!==state.call){
+      // You joined, switched rooms or left.
+      if(enabled&&(call||state.call))playVoiceCue(call?"join":"leave",output);
+      cueState.current={call,uids:null};
+      return;
+    }
+    if(!call||!callUids)return;
+    const now=new Set(callUids.split(","));
+    if(state.uids&&enabled&&!call.deaf){
+      const me=person?.id;
+      const joined=[...now].some(u=>u!==me&&!state.uids!.has(u));
+      const left=[...state.uids].some(u=>u!==me&&!now.has(u));
+      if(joined)playVoiceCue("join",output);
+      else if(left)playVoiceCue("leave",output);
+    }
+    state.uids=now;
+  },[call,callUids,person?.id,prefs.output,prefs.voiceSounds]);
   useEffect(()=>{
     if(stick.current && feed.current)feed.current.scrollTop=feed.current.scrollHeight;
     const last=messages.at(-1);
@@ -342,6 +418,15 @@ export default function Community(){
     try{await request("message",{channel:chatId,action:kind,id:m.id,...extra});}
     catch(e){report((e as Error).message);}
   }
+  // Message rows get one stable set of handlers that call the latest ones, so unchanged rows skip re-rendering.
+  useLayoutEffect(()=>{
+    rowHandlers.current={
+      action,
+      reply:m=>{setReply(m);draftInput.current?.focus();},
+      pick:m=>setPicker(m),
+      edit:m=>{setPicker(null);setEdit(m);setDraft(m.body);draftInput.current?.focus();},
+    };
+  });
   function changeDraft(text:string){
     setDraft(text);
     if(Date.now()-lastTyping.current>3000){
@@ -394,12 +479,22 @@ export default function Community(){
   }
   const channels=space?.channels.filter(c=>c.server===server || c.kind==="dm")??[];
   const groups=[...new Set(channels.map(c=>c.category||"Channels"))];
+  const avatars=new Map(space?.people.map(p=>[p.id,!!p.avatar])??[]);
+  const membersOf=(id:string):VoiceMember[]=>{
+    // Your own room comes from the live call roster, which is fresher and knows who is speaking.
+    if(call?.channel===id){
+      const seen=new Set<string>();
+      return call.participants.filter(p=>!seen.has(p.uid)&&seen.add(p.uid)).map(p=>({uid:p.uid,name:p.name,avatar:avatars.get(p.uid)??false,live:!!p.screen,cam:!!p.cam,speaking:call.speaking(p.peer)})).sort((a,b)=>a.name.localeCompare(b.name));
+    }
+    return rooms.filter(r=>r.channel===id).map(r=>({uid:r.uid,name:r.name,avatar:!!r.has_avatar,live:!!r.screen,cam:!!r.cam,speaking:false}));
+  };
   const currentServer=space?.servers.find(s=>s.id===server);
   const callTitle=space?.channels.find(c=>c.id===call?.channel)?.name;
   const feeds=call?.feeds.filter(f=>f.kind!=="voice")??[];
   const orderedFeeds=speaker?[...feeds].sort((a,b)=>Number(call?.speaking(b.peer))-Number(call?.speaking(a.peer))):feeds;
   const ownVoice=call?.local.get("cam");
   const bounded=ready===chatId?messages.slice(-350):[];
+  const names=new Map(bounded.map(m=>[m.id,m.name]));
   return <div className={"assembly "+(members?"with-members ":"")+(mobile?"mobile-nav ":"")+(prefs.compact?"compact":"")}>
     <nav className="rail" aria-label="Servers">
       <button className="mark" aria-label="RaRRcord home" onClick={()=>{setServer("community");setSelected("general");setStage(false);}}>R</button>
@@ -413,9 +508,9 @@ export default function Community(){
     <aside className="sidebar">
       <header className="community-header"><span className="community-tag">RARRCORD</span><h2>{currentServer?.name??"Community"}</h2></header>
       <div className="channel-list">
-        {groups.map(group=><details key={group} open><summary><ChevronDown size={14}/>{group}</summary>{channels.filter(c=>(c.category||"Channels")===group).map(c=><button key={c.id} className={"channel "+(selected===c.id?"selected":"")} onClick={()=>choose(c)}>
+        {groups.map(group=><details key={group} open><summary><ChevronDown size={14}/>{group}</summary>{channels.filter(c=>(c.category||"Channels")===group).map(c=><Fragment key={c.id}><button className={"channel "+(selected===c.id?"selected":"")} onClick={()=>choose(c)}>
           {c.kind==="voice"?<AudioLines size={17}/>:c.kind==="private"?<LockKeyhole size={15}/>:<Hash size={17}/>}<span>{c.name}</span>{c.unread>0&&chatId!==c.id&&<b className="badge">{c.unread>99?"99+":c.unread}</b>}{call?.channel===c.id&&<i className="voice-dot"/>}
-        </button>)}</details>)}
+        </button>{c.kind==="voice"&&<VoiceMembers members={membersOf(c.id)}/>}</Fragment>)}</details>)}
         <button className="channel dm-button" onClick={()=>{setDmUsers([]);setModal("dm");}}><Plus size={16}/>New direct message</button>
       </div>
       {call&&<div className="voice-status"><div><b><i className="voice-dot"/> Voice connected</b><span>{callTitle}</span></div><IconButton label="Disconnect" onClick={()=>voice.disconnect()}><LogOut size={18}/></IconButton></div>}
@@ -462,32 +557,8 @@ export default function Community(){
         <div className="message-feed" data-channel={chatId} ref={feed} onScroll={e=>{const el=e.currentTarget;stick.current=el.scrollHeight-el.scrollTop-el.clientHeight<100;}}>
           {hasMore&&bounded.length>=50&&<button className="older" onClick={earlier}>Load earlier messages</button>}
           {!bounded.length&&<div className="blank"><span className="empty-icon">{sidechatOpen?<MessageSquare size={26}/>:<Hash size={26}/>}</span><h2>{chatId&&ready!==chatId?"Loading messages…":find?"No matching messages":pinned?"No pinned messages":chatChannel?.name??"Welcome to RaRRcord"}</h2>{(!chatId||ready===chatId)&&<p>{find?"Try another search.":pinned?"Pinned messages will appear here.":chatChannel?"Start the conversation.":"Choose a channel to get started."}</p>}</div>}
-          {bounded.map((m,i)=>{
-            const newDay=i===0||day(bounded[i-1].created)!==day(m.created);
-            const joined=i>0&&!newDay&&bounded[i-1].uid===m.uid&&m.created-bounded[i-1].created<240000;
-            const reacts=Object.entries(m.reactions?JSON.parse(m.reactions) as Record<string,number>:{});
-            const mine=new Set<string>(m.my_reactions?JSON.parse(m.my_reactions):[]);
-            return <div className="message-row" key={m.id} style={{containIntrinsicSize:joined?"auto 28px":"auto 72px"}}>
-              {newDay&&<div className="date-divider"><span>{day(m.created)}</span></div>}
-              <article className={"message "+(joined?"joined":"")} aria-label={"Message by "+m.name}>
-                {!joined&&<Avatar name={m.name} uid={m.uid} has={m.has_avatar}/>}
-                <div className="message-content">
-                  {m.reply&&<span className="reply-label">Replying to {bounded.find(x=>x.id===m.reply)?.name??"an earlier message"}</span>}
-                  {!joined&&<div className="byline"><strong>{m.name}</strong><time dateTime={new Date(m.created).toISOString()}>{clock(m.created)}</time>{!!m.pinned&&<span className="tag">Pinned</span>}</div>}
-                  {m.body&&<div className="text-body">{markdown(m.body)}{m.edited&&<small> (edited)</small>}</div>}
-                  {m.attachment&&<Attachment message={m}/>}
-                  {reacts.length>0&&<div className="reaction-row">{reacts.map(([emoji,count])=><button key={emoji} type="button" aria-pressed={mine.has(emoji)} onClick={()=>void action("react",m,{emoji,remove:mine.has(emoji)})}>{emoji} {count}</button>)}</div>}
-                </div>
-                <details className="message-menu"><summary aria-label="Message actions">•••</summary><div>
-                  <button onClick={()=>{setReply(m);draftInput.current?.focus();}}>Reply</button>
-                  <button onClick={event=>{event.currentTarget.closest("details")?.removeAttribute("open");setPicker(m);}}>Add reaction</button>
-                  {person?.id===m.uid&&m.body&&<button onClick={()=>{setPicker(null);setEdit(m);setDraft(m.body);draftInput.current?.focus();}}>Edit</button>}
-                  {(person?.id===m.uid||person?.role==="admin")&&<><button onClick={()=>void action("pin",m)}>{m.pinned?"Unpin":"Pin"}</button><button className="danger" onClick={()=>{if(confirm("Delete this message?"))void action("delete",m);}}>Delete</button></>}
-                  {person?.id!==m.uid&&<button onClick={()=>{const reason=prompt("Why are you reporting this message?");if(reason)void action("report",m,{reason});}}>Report</button>}
-                </div></details>
-              </article>
-            </div>;
-          })}
+          {bounded.map((m,i)=><MessageRow key={m.id} m={m} previous={bounded[i-1]} replyName={m.reply?names.get(m.reply):undefined}
+            me={person?.id} admin={person?.role==="admin"} actions={rowActions}/>)}
         </div>
         {chatChannel&&<div className="compose-area">
           {picker==="emoji"&&<EmojiPicker label="Insert emoji" select={insertEmoji} close={()=>{setPicker(null);draftInput.current?.focus();}}/>}

@@ -33,6 +33,12 @@ export class Call {
   meter?:number;
   pressed=false;
   private closed=false;
+  // Remote speaking is measured from each peer's incoming voice audio, so it needs no signaling.
+  private ears?:AudioContext;
+  private earTimer?:number;
+  private hearing=new Map<string,{stream:MediaStream;analyser:AnalyserNode;source:MediaStreamAudioSourceNode;silent:number}>();
+  private feedKeys="";
+  private roster="";
   private starting=new Set<Medium>();
   constructor(channel:string,public prefs:Preferences,private screenBitrateLimit:number,private ice:RTCIceServer[],private changed:()=>void,private error:(message:string)=>void) {
     this.channel=channel;
@@ -70,6 +76,9 @@ export class Call {
   }
   async update(participants:Participant[], signals:Signal[]) {
     if(this.closed)return;
+    const roster=JSON.stringify(participants);
+    const rosterChanged=roster!==this.roster;
+    this.roster=roster;
     this.participants=participants;
     const present=new Set(participants.map(p=>p.peer));
     for(const [id,link] of this.links) if(!present.has(id)) {link.pc.close();this.links.delete(id);}
@@ -92,7 +101,8 @@ export class Call {
       }
       link.remote=participant;
     }
-    this.refresh();
+    // Most polls bring nothing new; only re-render the page when the roster or feeds changed.
+    this.refresh(rosterChanged || signals.length>0);
   }
   private create(remote:Participant) {
     const pc=new RTCPeerConnection({iceServers:this.ice});
@@ -125,6 +135,44 @@ export class Call {
       this.refresh();
     };
     this.publish(link,"voice");
+    this.listen();
+  }
+  private listen(){
+    if(this.earTimer!==undefined || this.closed || typeof AudioContext==="undefined")return;
+    try{this.ears=new AudioContext();void this.ears.resume();}catch{return;}
+    const samples=new Uint8Array(512);
+    this.earTimer=window.setInterval(()=>{
+      const ears=this.ears;
+      if(!ears)return;
+      if(ears.state==="suspended")void ears.resume().catch(()=>{});
+      let changed=false;
+      for(const [peer,ear] of this.hearing)if(!this.links.has(peer)){ear.source.disconnect();this.hearing.delete(peer);}
+      for(const [peer,link] of this.links){
+        const stream=[...link.incoming].find(([id,s])=>link.labels[id]==="voice"&&s.getAudioTracks().length>0)?.[1];
+        let ear=this.hearing.get(peer);
+        if(ear && ear.stream!==stream){ear.source.disconnect();this.hearing.delete(peer);ear=undefined;}
+        if(!ear && stream){
+          try{
+            const analyser=ears.createAnalyser();
+            analyser.fftSize=samples.length;
+            const source=ears.createMediaStreamSource(stream);
+            source.connect(analyser);
+            ear={stream,analyser,source,silent:0};
+            this.hearing.set(peer,ear);
+          }catch{continue;}
+        }
+        let talking=false;
+        if(ear){
+          ear.analyser.getByteTimeDomainData(samples);
+          const rms=Math.sqrt(samples.reduce((sum,n)=>sum+((n-128)/128)**2,0)/samples.length);
+          talking=rms>this.prefs.sensitivity/100;
+          if(talking)ear.silent=0;else ear.silent++;
+          if(!talking&&ear.silent<3)continue;
+        }
+        if(talking!==link.speaking){link.speaking=talking;changed=true;}
+      }
+      if(changed)this.changed();
+    },200);
   }
   private async receive(link:Link, data:Wire) {
     const pc=link.pc;
@@ -147,7 +195,8 @@ export class Call {
       this.publish(link,data.medium);
     }else if(data.type==="tracks"){
       link.labels=data.labels;
-    }else if(data.type==="speaking")link.speaking=!!data.active;
+    }
+    // "speaking" signals from older tabs are ignored: speaking is measured locally now.
   }
   private publish(link:Link, medium:Medium) {
     for(const sender of link.senders.get(medium)??[])link.pc.removeTrack(sender);
@@ -193,12 +242,16 @@ export class Call {
       void sender.setParameters(params).catch(()=>{});
     }
   }
-  private refresh(){
-    this.feeds=[];
+  private refresh(force=true){
+    const feeds:Feed[]=[];
     for(const [peer,link] of this.links) for(const [id,stream] of link.incoming){
       const kind=link.labels[id];
-      if(kind && link.watching.has(kind) && stream.getTracks().some(t=>t.readyState==="live"))this.feeds.push({key:id,kind,peer,stream});
+      if(kind && link.watching.has(kind) && stream.getTracks().some(t=>t.readyState==="live"))feeds.push({key:id,kind,peer,stream});
     }
+    const keys=feeds.map(f=>f.key+":"+f.kind+":"+f.peer).join(",");
+    if(!force && keys===this.feedKeys)return;
+    this.feedKeys=keys;
+    this.feeds=feeds;
     this.changed();
   }
   watch(peer:string,medium:"screen"|"cam",active:boolean){
@@ -297,7 +350,6 @@ export class Call {
         if(talking)silent=0;else silent++;
         if((talking||silent>=3)&&talking!==this.localSpeaking){
           this.localSpeaking=talking;
-          for(const link of this.links.values())void this.send(link.remote.peer,{type:"speaking",active:talking});
           this.changed();
         }
       },200);
@@ -308,7 +360,6 @@ export class Call {
     if(this.context)void this.context.close().catch(()=>{});
     this.context=undefined;
     this.localSpeaking=false;
-    for(const link of this.links.values())void this.send(link.remote.peer,{type:"speaking",active:false});
   }
   async metrics():Promise<Metrics[]>{
     const result:Metrics[]=[];
@@ -355,6 +406,11 @@ export class Call {
     window.removeEventListener("keyup",this.keyup);
     window.removeEventListener("blur",this.release);
     this.stopMeter();
+    window.clearInterval(this.earTimer);
+    for(const ear of this.hearing.values())ear.source.disconnect();
+    this.hearing.clear();
+    if(this.ears)void this.ears.close().catch(()=>{});
+    this.ears=undefined;
     for(const stream of this.local.values())stream.getTracks().forEach(track=>track.stop());
     for(const link of this.links.values())link.pc.close();
     this.links.clear();this.local.clear();
