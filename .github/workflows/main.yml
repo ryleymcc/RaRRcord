@@ -1,0 +1,41 @@
+Set-Location 'C:\Users\faste\OneDrive\Documents\ChatGPT\RaRRcord\RaRRcord'
+
+New-Item -ItemType Directory -Force '.github\workflows' | Out-Null
+
+@'
+name: Tests
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: Node.js tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Run tests
+        run: node --experimental-transform-types --test tests/*.test.mjs
+'@ | Set-Content '.github\workflows\tests.yml' -Encoding utf8
+
+git add -- .github/workflows/tests.yml
+git commit -m "ci: add automated GitHub tests" -- .github/workflows/tests.yml
+git push origin main
