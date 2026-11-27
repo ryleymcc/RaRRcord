@@ -6,6 +6,7 @@ export type Signal={id:number;sender:string;data:string};
 export type Feed={key:string;peer:string;kind:Medium;stream:MediaStream};
 type Link={
   remote:Participant;pc:RTCPeerConnection;making:boolean;ignoring:boolean;answering:boolean;
+  outgoing:Promise<void>; localCandidates:RTCIceCandidateInit[]|null;
   candidates:RTCIceCandidateInit[]; senders:Map<Medium,RTCRtpSender[]>; wanted:Set<Medium>;
   watching:Set<Medium>; incoming:Map<string,MediaStream>; labels:Record<string,Medium>;
   speaking:boolean; previous:Map<string,Record<string,number>>; retry:number;
@@ -50,6 +51,21 @@ export class Call {
       if (data.type==="description") this.error(e.message);
     });
   }
+  private sendNegotiation(link:Link,data:Extract<Wire,{type:"description"|"ice"}>) {
+    link.outgoing=link.outgoing.then(()=>this.send(link.remote.peer,data));
+  }
+  private async describe(link:Link) {
+    const candidates:RTCIceCandidateInit[]=[];
+    link.localCandidates=candidates;
+    try {
+      await link.pc.setLocalDescription();
+      if(!link.pc.localDescription)return;
+      this.sendNegotiation(link,{type:"description",value:link.pc.localDescription.toJSON()});
+      for(const value of candidates)this.sendNegotiation(link,{type:"ice",value});
+    } finally {
+      link.localCandidates=null;
+    }
+  }
   async update(participants:Participant[], signals:Signal[]) {
     if(this.closed)return;
     this.participants=participants;
@@ -78,17 +94,21 @@ export class Call {
   }
   private create(remote:Participant) {
     const pc=new RTCPeerConnection({iceServers:this.ice});
-    const link:Link={pc,remote,making:false,ignoring:false,answering:false,candidates:[],senders:new Map(),wanted:new Set(["voice"]),watching:new Set(["voice"]),incoming:new Map(),labels:{},speaking:false,previous:new Map(),retry:0};
+    const link:Link={pc,remote,making:false,ignoring:false,answering:false,outgoing:Promise.resolve(),localCandidates:null,candidates:[],senders:new Map(),wanted:new Set(["voice"]),watching:new Set(["voice"]),incoming:new Map(),labels:{},speaking:false,previous:new Map(),retry:0};
     this.links.set(remote.peer,link);
     pc.onnegotiationneeded=async()=>{
       try {
         link.making=true;
-        await pc.setLocalDescription();
-        if(pc.localDescription) await this.send(remote.peer,{type:"description",value:pc.localDescription.toJSON()});
+        await this.describe(link);
       } catch { if(!this.closed) this.error("Media negotiation failed."); }
       finally {link.making=false;}
     };
-    pc.onicecandidate=({candidate})=>{if(candidate)void this.send(remote.peer,{type:"ice",value:candidate.toJSON()});};
+    pc.onicecandidate=({candidate})=>{
+      if(!candidate)return;
+      const value=candidate.toJSON();
+      if(link.localCandidates)link.localCandidates.push(value);
+      else this.sendNegotiation(link,{type:"ice",value});
+    };
     pc.oniceconnectionstatechange=()=>{
       if(pc.iceConnectionState==="failed" && link.retry++<3)pc.restartIce();
       if(pc.iceConnectionState==="connected"||pc.iceConnectionState==="completed"){
@@ -113,10 +133,7 @@ export class Call {
       link.answering=data.value.type==="answer";
       try{await pc.setRemoteDescription(data.value);}finally{link.answering=false;}
       for(const candidate of link.candidates.splice(0))await pc.addIceCandidate(candidate).catch(()=>{});
-      if(data.value.type==="offer") {
-        await pc.setLocalDescription();
-        if(pc.localDescription)await this.send(link.remote.peer,{type:"description",value:pc.localDescription.toJSON()});
-      }
+      if(data.value.type==="offer")await this.describe(link);
     }else if(data.type==="ice"){
       if(link.ignoring)return;
       if(pc.remoteDescription) await pc.addIceCandidate(data.value);

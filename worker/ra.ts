@@ -195,8 +195,9 @@ async function route(request:Request, env:Cloudflare.Env):Promise<Response> {
         const permitted=await one("SELECT c.id FROM channels c WHERE c.kind='voice' AND c.id=? AND "+channelAccess("c"),room.channel,...access);
         if (permitted) {
           await run("UPDATE voice SET expires=? WHERE uid=? AND peer=?",now+lease,id,peer);
-          result.voice=await all("SELECT v.peer,v.uid,v.cam,v.screen,u.name FROM voice v JOIN users u ON v.uid=u.id JOIN channels c ON v.channel=c.id WHERE v.channel=? AND v.expires>? AND u.state='approved' AND "+channelAccess("c").replace("ca.uid=?","ca.uid=v.uid").replace("?='admin'","u.role='admin'").replace("ma.uid=?","ma.uid=v.uid")+" AND NOT EXISTS (SELECT 1 FROM blocks b WHERE (b.uid=? AND b.blocked=v.uid) OR (b.uid=v.uid AND b.blocked=?))",room.channel,now,id,id);
+          // A just-joined sender must be visible in the roster for its signal to be processed.
           result.signals=await all("SELECT id,sender,data FROM signals WHERE channel=? AND recipient=? AND id>? AND expires>? ORDER BY id LIMIT 100",room.channel,peer,number(q.get("signal")),now);
+          result.voice=await all("SELECT v.peer,v.uid,v.cam,v.screen,u.name FROM voice v JOIN users u ON v.uid=u.id JOIN channels c ON v.channel=c.id WHERE v.channel=? AND v.expires>? AND u.state='approved' AND "+channelAccess("c").replace("ca.uid=?","ca.uid=v.uid").replace("?='admin'","u.role='admin'").replace("ma.uid=?","ma.uid=v.uid")+" AND NOT EXISTS (SELECT 1 FROM blocks b WHERE (b.uid=? AND b.blocked=v.uid) OR (b.uid=v.uid AND b.blocked=?))",room.channel,now,id,id);
         }
       }
     }
@@ -204,13 +205,16 @@ async function route(request:Request, env:Cloudflare.Env):Promise<Response> {
   }
   if (path==="ice" && !write) {
     const stun=await one<{value:string}>("SELECT value FROM settings WHERE key='stun'");
-    const servers:RTCIceServer[]=[];
-    if (stun?.value) servers.push({urls:stun.value});
+    const servers:RTCIceServer[]=[{urls:stun?.value || "stun:stun.cloudflare.com:3478"}];
     if (env.RARRCORD_TURN_BROKER && env.RARRCORD_TURN_TOKEN) {
-      const reply=await fetch(env.RARRCORD_TURN_BROKER,{method:"POST",headers:{authorization:"Bearer "+env.RARRCORD_TURN_TOKEN},signal:AbortSignal.timeout(2500)});
-      if (reply.ok) {
-        const data=await reply.json<{iceServers:RTCIceServer[]}>();
-        if (Array.isArray(data.iceServers)) servers.push(...data.iceServers);
+      try {
+        const reply=await fetch(env.RARRCORD_TURN_BROKER,{method:"POST",headers:{authorization:"Bearer "+env.RARRCORD_TURN_TOKEN},signal:AbortSignal.timeout(2500)});
+        if (reply.ok) {
+          const data=await reply.json<{iceServers:RTCIceServer[]}>();
+          if (Array.isArray(data?.iceServers)) servers.push(...data.iceServers);
+        }
+      } catch {
+        console.warn("RaRRcord TURN broker unavailable; using STUN.");
       }
     }
     return json({servers});

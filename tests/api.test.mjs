@@ -108,6 +108,9 @@ test("message changes, private uploads and voice signaling stay inside authorize
   assert.equal(new TextDecoder().decode(await member("attachment?key="+file)),"private notes");
   await second("attachment?key="+file,{expect:404});
   const peer=crypto.randomUUID(), peer2=crypto.randomUUID();
+  assert.deepEqual(await member("ice"),{servers:[{urls:"stun:stun.cloudflare.com:3478"}]});
+  await owner("admin",{input:{action:"settings",bitrate:8000,upload:1000000,stun:"stun:stun.example.test:3478"}});
+  assert.deepEqual(await member("ice"),{servers:[{urls:"stun:stun.example.test:3478"}]});
   await member("signal",{input:{channel:"gaming",peer,target:peer2,data:{type:"subscribe",medium:"screen",active:true}},expect:403});
   await member("voice",{input:{action:"join",channel:"gaming",peer}});
   await second("voice",{input:{action:"join",channel:"general-voice",peer:peer2}});
