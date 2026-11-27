@@ -88,7 +88,9 @@ function Diagnostics({call,latency}:{call:Call|null;latency:number|null}){
     {!records.length&&<p>Join a voice room with another participant to measure a peer connection.</p>}
     {records.map((r,i)=><div className="metric-card" key={r.name+"-"+i}><h3>{r.name} · {r.direction}</h3><dl>{[
       ["Connection",r.connection],["ICE",r.ice],["ICE gathering",r.gathering],["Path",r.route??"Unavailable"],["Codec",r.codec??"Unavailable"],
-      ["Resolution",r.resolution??"Unavailable"],["Rate",value(r.fps," FPS")],["Bitrate",value(r.bitrate," Kbps")],["Round trip",value(r.rtt," ms")],
+      ["Resolution",r.resolution??"Unavailable"],["Rate",value(r.fps," FPS")],["Actual bitrate",value(r.bitrate," Kbps")],
+      ...(r.direction==="Sending video"?[["Encoder target",value(r.targetBitrate," Kbps")]]:[]),
+      ["Round trip",value(r.rtt," ms")],
       ["Packet loss",value(r.loss,"%")],["Jitter",value(r.jitter," ms")],["Frames dropped",value(r.dropped)],["Frames encoded",value(r.encoded)],["Frames decoded",value(r.decoded)],
       ["Encode time per frame",value(r.encodeMs," ms")],["Decode time per frame",value(r.decodeMs," ms")],["Available outgoing",value(r.available," Kbps")],["Quality limit",r.limited??"Unavailable"],
     ].map(([label,n])=><div key={label}><dt>{label}</dt><dd>{n}</dd></div>)}</dl></div>)}
@@ -146,10 +148,16 @@ function UserSettings({person,prefs,limit,save,report}:{person:Person;prefs:Pref
       {form.ptt&&<label>Push-to-talk key<input value={form.key} readOnly onKeyDown={e=>{if(e.code!=="Tab"){e.preventDefault();change("key",e.code);}}}/></label>}
       <div className="inline"><button type="button" onClick={testMic}>Test microphone</button><span>{test}</span></div>
     </fieldset>
-    <fieldset><legend>Screen sharing</legend><label>Target resolution and frame rate<select value={form.resolution} onChange={e=>change("resolution",e.target.value)}>{qualities.map(q=><option key={q} value={q}>{q.replace("2160","4K").replace("x"," · ")+" FPS"}</option>)}</select></label>
-      <label>Target bitrate (Kbps)<input type="number" min={500} max={limit} value={form.bitrate} onChange={e=>change("bitrate",+e.target.value)}/></label>
-      <label>Codec preference<select value={form.codec} onChange={e=>change("codec",e.target.value)}><option value="auto">Automatic</option>{typeof RTCRtpSender!=="undefined"&&codecs().map(c=><option key={c}>{c}</option>)}</select></label>
-      <label>Streaming mode<select value={form.mode} onChange={e=>change("mode",e.target.value)}><option value="motion">Gaming · motion clarity</option><option value="detail">Desktop · text clarity</option></select></label>
+    <fieldset><legend>Screen sharing</legend>
+      <label>Quality profile<select value={form.screenQuality} onChange={e=>change("screenQuality",e.target.value==="custom"?"custom":"maximum")}><option value="maximum">Highest quality</option><option value="custom">Custom</option></select></label>
+      {form.screenQuality==="maximum"?<p>Captures at native resolution and asks for the highest available frame rate. WebRTC adapts compression and frame rate during the call.</p>:<>
+        <label>Capture resolution and frame rate<select value={form.resolution} onChange={e=>change("resolution",e.target.value)}>{qualities.map(q=><option key={q} value={q}>{q.replace("2160","4K").replace("x"," · ")+" FPS"}</option>)}</select></label>
+        <label>Bitrate ceiling (Kbps)<input aria-describedby="bitrate-help" type="number" min={0} max={limit||4294967} placeholder="No personal cap" value={form.bitrate||""} onChange={e=>change("bitrate",+e.target.value)}/></label>
+        <small id="bitrate-help">Leave blank for no personal bitrate cap.</small>
+        <label>Codec preference<select value={form.codec} onChange={e=>change("codec",e.target.value)}><option value="auto">Automatic</option>{typeof RTCRtpSender!=="undefined"&&codecs().map(c=><option key={c}>{c}</option>)}</select></label>
+        <label>Streaming mode<select value={form.mode} onChange={e=>change("mode",e.target.value)}><option value="motion">Gaming · motion clarity</option><option value="detail">Desktop · text clarity</option></select></label>
+      </>}
+      {limit>0&&<small>Community bitrate ceiling {limit.toLocaleString()} Kbps.</small>}
     </fieldset>
     <fieldset><legend>Appearance and notifications</legend><label className="inline"><input type="checkbox" checked={form.compact} onChange={e=>change("compact",e.target.checked)}/>Compact messages</label>
       <label className="inline"><input type="checkbox" checked={form.notifications} onChange={async e=>{const want=e.target.checked;change("notifications",want&&"Notification" in window&&(await Notification.requestPermission())==="granted");}}/>Browser mention notifications</label>
@@ -192,7 +200,7 @@ export default function Community(){
   const person=auth?.user;
   const channel=space?.channels.find(c=>c.id===selected);
   const prefs={...defaults,...space?.prefs};
-  const limit=Number(space?.settings.find(v=>v.key==="bitrate")?.value??50000);
+  const limit=Number(space?.settings.find(v=>v.key==="bitrate")?.value??0);
   const report=useCallback((message:string)=>setToast(message),[]);
   const refreshAuth=useCallback(()=>request<Auth>("session").then(setAuth).catch(e=>setToast(e.message)),[]);
   const refresh=useCallback(()=>request<Workspace>("workspace").then(setSpace),[]);
@@ -288,7 +296,7 @@ export default function Community(){
     try{
       const ice=await request<{servers:RTCIceServer[]}>("ice");
       currentCall.current?.close();
-      const linked=new Call(c.id,{...prefs,bitrate:Math.min(limit,prefs.bitrate)},ice.servers,()=>refreshCall(n=>n+1),report);
+      const linked=new Call(c.id,prefs,limit,ice.servers,()=>refreshCall(n=>n+1),report);
       try{await request("voice",{action:"join",channel:c.id,peer:linked.peer});}
       catch(error){linked.close();throw error;}
       currentCall.current=linked;setCall(linked);

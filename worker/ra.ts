@@ -8,6 +8,7 @@ const day = 86400000;
 const lease = 16000;
 const sessionName = "__Host-rarr";
 const authHeaders = { "cache-control":"private, no-store", "x-content-type-options":"nosniff" };
+const unicodeEmoji = new RegExp("^(?:\\p{RGI_Emoji})$", "v");
 const seed = [
   ["general","General","text"], ["announcements","Announcements","text"], ["development","Development","text"],
   ["screenshots","Screenshots","text"], ["off-topic","Off-topic","text"], ["general-voice","General Voice","voice"],
@@ -145,6 +146,10 @@ async function route(request:Request, env:Cloudflare.Env):Promise<Response> {
     return c;
   };
   const cid=()=>string(write?body.channel:q.get("channel"),64);
+  const checkMessageTarget=async (channel:Channel, reply:number|null)=>{
+    if (reply && !await one("SELECT 1 FROM messages WHERE id=? AND channel=? AND deleted=0",reply,channel.id)) deny(404,"Reply target unavailable.");
+    if (channel.kind==="dm" && await one("SELECT 1 FROM channel_members cm JOIN blocks b ON (b.uid=? AND b.blocked=cm.uid) OR (b.uid=cm.uid AND b.blocked=?) WHERE cm.channel=?",id,id,channel.id)) deny(403,"Direct messaging unavailable.");
+  };
   const moderate=async (channel:Channel)=> admin || !!(channel.server && await one(
     "SELECT 1 FROM members WHERE server=? AND uid=? AND role='moderator'",channel.server,id));
   const throttle=async (bucket:string, limit:number)=>{
@@ -154,7 +159,7 @@ async function route(request:Request, env:Cloudflare.Env):Promise<Response> {
   };
   const changed=(channel:string, mid:number)=>sql("INSERT INTO events(channel,mid,time) VALUES(?,?,?)",channel,mid,now);
   async function readMessages(clause:string, args:Value[], order:string, limit:number) {
-    return all("SELECT m.*,u.name,u.username,u.avatar IS NOT NULL AS has_avatar,(SELECT json_group_object(emoji,count) FROM (SELECT emoji,COUNT(*) count FROM reactions WHERE mid=m.id GROUP BY emoji)) AS reactions FROM messages m JOIN users u ON u.id=m.uid WHERE "+clause+" ORDER BY "+order+" LIMIT ?",...args,limit);
+    return all("SELECT m.*,u.name,u.username,u.avatar IS NOT NULL AS has_avatar,(SELECT json_group_object(emoji,count) FROM (SELECT emoji,COUNT(*) count FROM reactions WHERE mid=m.id GROUP BY emoji)) AS reactions,(SELECT json_group_array(emoji) FROM reactions WHERE mid=m.id AND uid=?) AS my_reactions FROM messages m JOIN users u ON u.id=m.uid WHERE "+clause+" ORDER BY "+order+" LIMIT ?",id,...args,limit);
   }
   if (path==="workspace" && !write) {
     return json({
@@ -167,7 +172,6 @@ async function route(request:Request, env:Cloudflare.Env):Promise<Response> {
   }
   if (path==="history" && !write) {
     const c=await chan(cid());
-    if (c.kind==="voice") deny(400,"Select a text channel.");
     const before=number(q.get("before"),Number.MAX_SAFE_INTEGER);
     const search=q.get("search")?.trim().slice(0,100);
     const cursor=await one<{id:number}>("SELECT COALESCE(MAX(id),0) id FROM events WHERE channel=?",c.id);
@@ -181,7 +185,7 @@ async function route(request:Request, env:Cloudflare.Env):Promise<Response> {
     if (q.has("channel")) {
       const c=await chan(cid());
       const after=number(q.get("after"));
-      const events=await all<{id:number;mid:number}>("SELECT id,mid FROM events WHERE channel=? AND id>? ORDER BY id LIMIT 120",c.id,after);
+      const events=await all<{id:number;mid:number}>("SELECT id,mid FROM events WHERE channel=? AND id>? ORDER BY id LIMIT 95",c.id,after);
       const ids=[...new Set(events.map(e=>e.mid))];
       result.cursor=events.at(-1)?.id??after;
       result.messages=ids.length?await readMessages("m.channel=? AND m.id IN ("+ids.map(()=>"?").join(",")+")",[c.id,...ids],"m.id",120):[];
@@ -272,20 +276,26 @@ async function route(request:Request, env:Cloudflare.Env):Promise<Response> {
     const file=data.get("file");
     if (!file || typeof file==="string" || !file.size || file.size>limit) deny(413,"File missing or too large.");
     const c=path==="upload"?await chan(string(data.get("channel"),64)):null;
-    if (c?.kind==="voice") deny(400,"Select a text channel.");
-    const filename=file.name.replace(/[\u0000-\u001f\u007f]/g,"").slice(0,180)||"attachment";
+    const gif=c && data.get("gif")==="1";
+    const caption=gif?string(data.get("text")??"",8000,0):"";
+    const reply=gif && data.has("reply")?number(data.get("reply")):null;
+    if (c) await checkMessageTarget(c,reply);
+    let filename=file.name.replace(/[\u0000-\u001f\u007f]/g,"").slice(0,180)||"attachment";
     const head=new Uint8Array(await file.slice(0,16).arrayBuffer());
     const ascii=String.fromCharCode(...head);
     const media=head[0]===137 && ascii.slice(1,4)==="PNG"?"image/png":
       head[0]===255 && head[1]===216 && head[2]===255?"image/jpeg":
       /^GIF8[79]a/.test(ascii)?"image/gif":ascii.startsWith("RIFF")&&ascii.slice(8,12)==="WEBP"?"image/webp":"application/octet-stream";
     if (!c && media==="application/octet-stream") deny(415,"Use a PNG, JPEG, GIF, or WebP avatar.");
+    if (gif && media!=="image/gif") deny(415,"Choose a GIF file.");
+    if (media==="image/gif" && !/\.gif$/i.test(filename)) filename=filename.slice(0,176)+".gif";
     const key=token();
     await env.BUCKET.put(key,file.stream(),{httpMetadata:{contentType:media}});
     try {
       if (c) await db.batch([
-        sql("INSERT INTO messages(channel,uid,body,attachment,filename,created) VALUES(?,?,?,?,?,?)",c.id,id,"",key,filename,now),
+        sql("INSERT INTO messages(channel,uid,body,attachment,filename,reply,created) VALUES(?,?,?,?,?,?,?)",c.id,id,caption,key,filename,reply,now),
         sql("INSERT INTO events(channel,mid,time) SELECT channel,id,? FROM messages WHERE attachment=?",now,key),
+        sql("DELETE FROM typing WHERE channel=? AND uid=?",c.id,id),
       ]);
       else await run("UPDATE users SET avatar=? WHERE id=?",key,id);
     } catch(error) {
@@ -297,13 +307,11 @@ async function route(request:Request, env:Cloudflare.Env):Promise<Response> {
   if (path==="message") {
     await throttle(path,45);
     const c=await chan(cid());
-    if (c.kind==="voice") deny(400,"Select a text channel.");
     const action=body.action??"send";
     if (action==="send") {
       const text=string(body.text,8000);
       const reply=body.reply?number(body.reply):null;
-      if (reply && !await one("SELECT 1 FROM messages WHERE id=? AND channel=? AND deleted=0",reply,c.id)) deny(404,"Reply target unavailable.");
-      if (c.kind==="dm" && await one("SELECT 1 FROM channel_members cm JOIN blocks b ON (b.uid=? AND b.blocked=cm.uid) OR (b.uid=cm.uid AND b.blocked=?) WHERE cm.channel=?",id,id,c.id)) deny(403,"Direct messaging unavailable.");
+      await checkMessageTarget(c,reply);
       await db.batch([
         sql("INSERT INTO messages(channel,uid,body,reply,created) VALUES(?,?,?,?,?)",c.id,id,text,reply,now),
         sql("INSERT INTO events(channel,mid,time) VALUES(?,last_insert_rowid(),?)",c.id,now),
@@ -315,8 +323,8 @@ async function route(request:Request, env:Cloudflare.Env):Promise<Response> {
     const m=await one<{uid:string;attachment:string|null}>("SELECT uid,attachment FROM messages WHERE channel=? AND id=? AND deleted=0",c.id,mid);
     if (!m) deny(404,"Message unavailable.");
     if (action==="react") {
-      const emoji=string(body.emoji,16);
-      if (!["👍","❤️","😂","🎉","👀"].includes(emoji)) deny(400,"Invalid reaction.");
+      const emoji=string(body.emoji,64);
+      if (!unicodeEmoji.test(emoji)) deny(400,"Invalid reaction.");
       await db.batch([body.remove?sql("DELETE FROM reactions WHERE mid=? AND uid=? AND emoji=?",mid,id,emoji):
         sql("INSERT OR IGNORE INTO reactions(mid,uid,emoji) VALUES(?,?,?)",mid,id,emoji),changed(c.id,mid)]);
       return json({});
@@ -474,7 +482,8 @@ async function route(request:Request, env:Cloudflare.Env):Promise<Response> {
     } else if (action==="settings") {
       const bitrate=number(body.bitrate), upload=number(body.upload);
       const stun=string(body.stun??"",200,0);
-      if (bitrate<500 || bitrate>50000 || upload<100000 || upload>20000000 || (stun && !/^stuns?:[a-z0-9.-]+(?::[0-9]+)?$/i.test(stun))) deny(400,"Invalid application settings.");
+      if (bitrate>4294967 || (bitrate>0 && bitrate<500)) deny(400,"Set a bitrate ceiling of at least 500 Kbps or leave it blank.");
+      if (upload<100000 || upload>20000000 || (stun && !/^stuns?:[a-z0-9.-]+(?::[0-9]+)?$/i.test(stun))) deny(400,"Invalid application settings.");
       for (const [k,val] of Object.entries({bitrate:String(bitrate),upload:String(upload),stun})) commands.push(sql("INSERT INTO settings(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",k,val));
     } else deny(400,"Invalid administration action.");
     commands.push(audit(action,target||key));

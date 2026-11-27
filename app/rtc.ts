@@ -1,4 +1,5 @@
 import { request, type Preferences } from "./ra-client";
+import { screenShareSettings, useNativeCapture, videoCodecPreferences } from "./screen-share";
 export type Participant={uid:string;peer:string;name:string;cam:number;screen:number};
 type Medium="voice"|"cam"|"screen";
 type Wire={type:"description";value:RTCSessionDescriptionInit}|{type:"ice";value:RTCIceCandidateInit}|{type:"subscribe";medium:Medium;active:boolean}|{type:"tracks";labels:Record<string,Medium>}|{type:"speaking";active:boolean};
@@ -11,7 +12,7 @@ type Link={
   watching:Set<Medium>; incoming:Map<string,MediaStream>; labels:Record<string,Medium>;
   speaking:boolean; previous:Map<string,Record<string,number>>; retry:number;
 };
-export type Metrics={name:string; connection:string; ice:string; gathering:string; direction:string; codec?:string; resolution?:string; fps?:number; bitrate?:number; rtt?:number; loss?:number; jitter?:number; dropped?:number; encoded?:number; decoded?:number; encodeMs?:number; decodeMs?:number; available?:number; limited?:string; route?:string};
+export type Metrics={name:string; connection:string; ice:string; gathering:string; direction:string; codec?:string; resolution?:string; fps?:number; bitrate?:number; targetBitrate?:number; rtt?:number; loss?:number; jitter?:number; dropped?:number; encoded?:number; decoded?:number; encodeMs?:number; decodeMs?:number; available?:number; limited?:string; route?:string};
 
 export function codecs() {
   return [...new Set(RTCRtpSender.getCapabilities?.("video")?.codecs.map(c=>c.mimeType.split("/")[1]).filter(c=>["H264","VP8","VP9","AV1"].includes(c))??[])];
@@ -32,7 +33,7 @@ export class Call {
   pressed=false;
   private closed=false;
   private starting=new Set<Medium>();
-  constructor(channel:string,public prefs:Preferences,private ice:RTCIceServer[],private changed:()=>void,private error:(message:string)=>void) {
+  constructor(channel:string,public prefs:Preferences,private screenBitrateLimit:number,private ice:RTCIceServer[],private changed:()=>void,private error:(message:string)=>void) {
     this.channel=channel;
     window.addEventListener("keydown",this.keydown);
     window.addEventListener("keyup",this.keyup);
@@ -157,10 +158,9 @@ export class Call {
         if(track.kind==="video"){
           const transceiver=link.pc.getTransceivers().find(t=>t.sender===sender);
           const supported=RTCRtpSender.getCapabilities?.("video")?.codecs??[];
-          const selected=this.prefs.codec;
+          const selected=medium==="screen"?screenShareSettings(this.prefs,this.screenBitrateLimit).codec:this.prefs.codec;
           if(transceiver?.setCodecPreferences && selected!=="auto"){
-            const sorted=[...supported].sort((a,b)=>Number(b.mimeType==="video/"+selected)-Number(a.mimeType==="video/"+selected));
-            try{transceiver.setCodecPreferences(sorted);}catch{}
+            try{transceiver.setCodecPreferences(videoCodecPreferences(supported,selected));}catch{}
           }
         }
         return sender;
@@ -172,14 +172,23 @@ export class Call {
     void this.send(link.remote.peer,{type:"tracks",labels});
   }
   private applyEncoding(link:Link){
-    const [,fps]=this.prefs.resolution.split("x").map(Number);
+    const screen=screenShareSettings(this.prefs,this.screenBitrateLimit);
     for(const [medium,senders] of link.senders)for(const sender of senders){
       if(sender.track?.kind!=="video")continue;
       const params=sender.getParameters();
-      if(!params.encodings?.length)continue;
-      params.encodings[0].maxBitrate=this.prefs.bitrate*1000;
-      params.encodings[0].maxFramerate=medium==="cam"?30:fps;
-      params.degradationPreference=this.prefs.mode==="motion"?"maintain-framerate":"maintain-resolution";
+      const encoding=params.encodings?.[0];
+      if(!encoding)continue;
+      if(medium==="screen"){
+        if(screen.bitrateCap===undefined)delete encoding.maxBitrate;
+        else encoding.maxBitrate=screen.bitrateCap;
+        if(screen.frameRateCap===undefined)delete encoding.maxFramerate;
+        else encoding.maxFramerate=screen.frameRateCap;
+        params.degradationPreference=screen.hint==="detail"?"maintain-resolution":"maintain-framerate";
+      }else{
+        encoding.maxBitrate=Math.min(this.screenBitrateLimit||Infinity,this.prefs.bitrate||8000)*1000;
+        encoding.maxFramerate=30;
+        params.degradationPreference=this.prefs.mode==="motion"?"maintain-framerate":"maintain-resolution";
+      }
       void sender.setParameters(params).catch(()=>{});
     }
   }
@@ -210,16 +219,18 @@ export class Call {
     this.starting.add(kind);
     try{
       const prefs=this.prefs;
-      const [height,fps]=prefs.resolution.split("x").map(Number);
+      const screen=screenShareSettings(prefs,this.screenBitrateLimit);
       const capture=navigator.mediaDevices;
       if(!capture || (kind==="screen" && !capture.getDisplayMedia))throw new Error("This browser or window does not support the requested capture. Open the Site in a regular browser tab.");
-      const stream=kind==="screen"?await capture.getDisplayMedia({video:{height:{ideal:height},frameRate:{ideal:fps}},audio:true}):
+      const stream=kind==="screen"?await capture.getDisplayMedia({video:screen.capture,audio:true}):
         await capture.getUserMedia(kind==="cam"?{video:{deviceId:prefs.camera?{exact:prefs.camera}:undefined,height:{ideal:720},frameRate:{ideal:30}}}:
           {audio:{deviceId:prefs.input?{exact:prefs.input}:undefined,noiseSuppression:prefs.noise,echoCancellation:prefs.echo,autoGainControl:prefs.gain}});
+      const screenTrack=kind==="screen"?stream.getVideoTracks()[0]:undefined;
+      if(screenTrack && screen.maximum)await useNativeCapture(screenTrack).catch(()=>{});
       if(this.closed){stream.getTracks().forEach(track=>track.stop());return;}
       this.local.set(kind,stream);
       for(const track of stream.getTracks()) {
-        if(track.kind==="video")track.contentHint=kind==="screen"&&prefs.mode==="detail"?"detail":"motion";
+        if(track.kind==="video")track.contentHint=kind==="screen"?screen.hint:"motion";
         track.addEventListener("ended",()=>{if(this.local.get(kind)===stream && (track.kind==="video"||kind==="voice"))void this.stop(kind);});
       }
       this.micState();
@@ -298,6 +309,7 @@ export class Call {
         result.push({...base,direction:(out?"Sending ":"Receiving ")+(s.kind??"media"),
           codec:rows.find(x=>x.id===s.codecId)?.mimeType,resolution:s.frameWidth&&s.frameHeight?s.frameWidth+"×"+s.frameHeight:undefined,
           fps:frameDelta===undefined?undefined:frameDelta/elapsed,bitrate:byteDelta===undefined?undefined:8*byteDelta/elapsed/1000,
+          targetBitrate:typeof s.targetBitrate==="number"?s.targetBitrate/1000:undefined,
           jitter:s.jitter===undefined?undefined:s.jitter*1000,loss:lostDelta===undefined||packetsDelta===undefined||packetsDelta+lostDelta===0?undefined:lostDelta*100/(packetsDelta+lostDelta),
           dropped:s.framesDropped,encoded:s.framesEncoded,decoded:s.framesDecoded,limited:s.qualityLimitationReason,
           encodeMs:out&&timeDelta!==undefined&&frameDelta?1000*timeDelta/frameDelta:undefined,

@@ -89,7 +89,7 @@ export default function Admin({space,server,report,refresh}:{space:Workspace;ser
     </div>}
     {tab==="Settings"&&<form className="settings-form" onSubmit={e=>void act({action:"settings",...form(e)})}>
       <label>Maximum upload size (bytes)<input required name="upload" type="number" min={100000} max={20000000} defaultValue={settings.upload??8000000}/></label>
-      <label>Maximum stream bitrate target (Kbps)<input required name="bitrate" type="number" min={500} max={50000} defaultValue={settings.bitrate??50000}/></label>
+      <label>Community stream bitrate ceiling (Kbps)<input name="bitrate" type="number" min={0} max={4294967} placeholder="No community cap" defaultValue={Number(settings.bitrate)||""}/></label>
       <label>STUN server<input name="stun" placeholder="stun:hostname:3478" defaultValue={settings.stun??""}/></label>
       <p>STUN or a TURN relay can help users on different networks connect. A TURN broker can be configured in Sites using server-only values that issue short-lived credentials.</p><button className="primary">Save settings</button>
     </form>}
