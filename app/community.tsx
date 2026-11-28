@@ -554,7 +554,7 @@ export default function Community(){
       {mainStage&&<div className="stage">
         {call?<><div className="stage-head"><div><h2>{callTitle}</h2><p>{call.participants.length} connected</p></div><button onClick={()=>setSpeaker(!speaker)}>{speaker?"Grid view":"Active speaker view"}</button></div>
           <div className={"stage-grid"+(speaker?" speaker":"")}>{call.participants.map(participant=><div key={participant.peer} className={"participant "+(call.speaking(participant.peer)?"speaking":"")}><Avatar name={participant.name} uid={participant.uid}/><b>{participant.name}{participant.peer===call.peer?" (you)":""}</b>
-            {participant.peer!==call.peer&&<div className="inline">{(["cam","screen"] as const).filter(k=>participant[k]).map(k=><button key={k} onClick={()=>call.watch(participant.peer,k,!call.watching(participant.peer,k))}>{call.watching(participant.peer,k)?"Stop "+(k==="cam"?"camera":"watching"):k==="cam"?"Watch camera":"Watch screen"}</button>)}</div>}
+            {participant.peer!==call.peer&&<div className="inline">{(["cam","screen"] as const).filter(k=>participant[k]).map(k=><button key={k} onClick={()=>call.watch(participant.peer,k,!call.watching(participant.peer,k))}>{(call.watching(participant.peer,k)?"Hide ":"Show ")+(k==="cam"?"camera":"screen")}</button>)}</div>}
             {participant.peer!==call.peer&&<label className="volume">Volume<input type="range" min={0} max={1} step={0.05} value={volumes[participant.peer]??1} onChange={e=>setVolumes(v=>({...v,[participant.peer]:+e.target.value}))}/></label>}
           </div>)}
           {ownVoice&&<div className="video-card"><Media feed={{key:"preview",peer:call.peer,kind:"cam",stream:ownVoice}} deaf output="" video volume={0}/><span>Your camera preview</span></div>}

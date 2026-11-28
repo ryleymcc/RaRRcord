@@ -10,7 +10,7 @@ type Link={
   remote:Participant;pc:RTCPeerConnection;making:boolean;ignoring:boolean;answering:boolean;
   outgoing:Promise<void>; localCandidates:RTCIceCandidateInit[]|null;
   candidates:RTCIceCandidateInit[]; senders:Map<Medium,RTCRtpSender[]>; wanted:Set<Medium>;
-  watching:Set<Medium>; incoming:Map<string,MediaStream>; labels:Record<string,Medium>;
+  watching:Set<Medium>; declined:Set<Medium>; incoming:Map<string,MediaStream>; labels:Record<string,Medium>;
   speaking:boolean; previous:Map<string,Record<string,number>>; retry:number;
 };
 export type Metrics={peer:string; stream?:string; name:string; connection:string; ice:string; gathering:string; direction:string; codec?:string; resolution?:string; fps?:number; bitrate?:number; targetBitrate?:number; rtt?:number; loss?:number; jitter?:number; dropped?:number; encoded?:number; decoded?:number; encodeMs?:number; decodeMs?:number; available?:number; limited?:string; route?:string};
@@ -99,8 +99,14 @@ export class Call {
     for(const participant of participants){
       const link=this.links.get(participant.peer);
       if(!link)continue;
+      // Cameras and screen shares open on their own. "Stop watching" holds until that share ends.
       for(const medium of ["cam","screen"] as const){
-        if(!participant[medium] && link.remote[medium] && link.watching.has(medium)) this.watch(participant.peer,medium,false);
+        if(participant[medium]){
+          if(!link.watching.has(medium) && !link.declined.has(medium)) this.watch(participant.peer,medium,true,false);
+        }else{
+          if(link.watching.has(medium)) this.watch(participant.peer,medium,false,false);
+          link.declined.delete(medium);
+        }
       }
       link.remote=participant;
     }
@@ -109,7 +115,7 @@ export class Call {
   }
   private create(remote:Participant) {
     const pc=new RTCPeerConnection({iceServers:this.ice});
-    const link:Link={pc,remote,making:false,ignoring:false,answering:false,outgoing:Promise.resolve(),localCandidates:null,candidates:[],senders:new Map(),wanted:new Set(["voice"]),watching:new Set(["voice"]),incoming:new Map(),labels:{},speaking:false,previous:new Map(),retry:0};
+    const link:Link={pc,remote,making:false,ignoring:false,answering:false,outgoing:Promise.resolve(),localCandidates:null,candidates:[],senders:new Map(),wanted:new Set(["voice"]),watching:new Set(["voice"]),declined:new Set(),incoming:new Map(),labels:{},speaking:false,previous:new Map(),retry:0};
     this.links.set(remote.peer,link);
     pc.onnegotiationneeded=async()=>{
       try {
@@ -257,11 +263,15 @@ export class Call {
     this.feeds=feeds;
     this.changed();
   }
-  watch(peer:string,medium:"screen"|"cam",active:boolean){
+  watch(peer:string,medium:"screen"|"cam",active:boolean,chosen=true){
     const link=this.links.get(peer);
     if(!link)return;
     if(active)link.watching.add(medium);
     else link.watching.delete(medium);
+    if(chosen){
+      if(active)link.declined.delete(medium);
+      else link.declined.add(medium);
+    }
     void this.send(peer,{type:"subscribe",medium,active});
     this.refresh();
   }
