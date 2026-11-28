@@ -28,7 +28,7 @@ function fixture() {
   const BUCKET={
     async put(key,data,{httpMetadata}){objects.set(key,{body:await new Response(data).arrayBuffer(),httpMetadata});},
     async get(key){return objects.get(key);},
-    async delete(key){objects.delete(key);},
+    async delete(key){for(const k of [key].flat())objects.delete(k);},
   };
   const origin="https://ra.example";
   const env={DB,BUCKET,RARRCORD_OWNER_EMAIL:"owner@example.test"};
@@ -62,7 +62,7 @@ function fixture() {
       return body;
     };
   }
-  return {visitor};
+  return {visitor,objects};
 }
 
 test("independent app sessions enforce approval, origin, ownership, bans and revocation",async()=>{
@@ -216,4 +216,41 @@ test("uploads need a length and count toward a daily allowance, and read routes 
   await owner("upload",{input:png()});
   for(let i=0;i<10;i++)await owner("ice");
   await owner("ice",{expect:429});
+});
+
+test("names cannot hide characters or copy another member, and group DMs respect blocks",async()=>{
+  const {visitor}=fixture();
+  const owner=visitor("owner"), a=visitor("a"), b=visitor("b");
+  await owner("enroll",{input:{username:"owner",name:"Alek"}});
+  await a("enroll",{input:{username:"alek",name:"x"},expect:409});
+  await a("enroll",{input:{username:"aaa",name:"alek"},expect:409});
+  await a("enroll",{input:{username:"aaa",name:"A\u202eli\u200bce"}});
+  await b("enroll",{input:{username:"bbb"}});
+  for(const [id,client] of [["a",a],["b",b]]){await owner("admin",{input:{action:"account",target:id,state:"approved",role:"member"}});await client("enroll",{input:{}});}
+  const people=(await owner("workspace")).people;
+  assert.equal(people.find(p=>p.id==="a").name,"Alice");
+  await b("profile",{input:{name:"ALEK",status:"online"},expect:409});
+  await b("profile",{input:{name:"Bob",status:"online"}});
+  await b("block",{input:{users:["a"]}});
+  await owner("dm",{input:{users:["a","b"]},expect:403});
+  const {id:dm}=await owner("dm",{input:{users:["a"]}});
+  await owner("message",{input:{channel:dm,text:"hi"}});
+  const mid=(await a("history?channel="+dm)).messages[0].id;
+  await a("block",{input:{users:["owner"]}});
+  await a("message",{input:{channel:dm,id:mid,action:"react",emoji:"👍"},expect:403});
+});
+
+test("deleting a channel or server removes its messages and files",async()=>{
+  const {visitor,objects}=fixture();
+  const owner=visitor("owner");
+  await owner("enroll",{input:{username:"owner"}});
+  const {id:server}=await owner("admin",{input:{action:"server",name:"Temp"}});
+  const {id:channel}=await owner("admin",{input:{action:"channel",server,name:"temp",kind:"text"}});
+  const form=new FormData();form.set("channel",channel);form.set("file",new File(["notes"],"n.txt"));
+  await owner("upload",{input:form});
+  await owner("message",{input:{channel,text:"bye"}});
+  assert.equal(objects.size,1);
+  await owner("admin",{input:{action:"server_delete",target:server}});
+  assert.equal(objects.size,0);
+  await owner("history?channel="+channel,{expect:404});
 });
