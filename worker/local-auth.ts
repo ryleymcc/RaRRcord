@@ -1,4 +1,5 @@
 import { randomBytes, createHash, scryptSync, timingSafeEqual } from "node:crypto";
+import { messageLinkPath, parseMessageQuery } from "../lib/message-links.ts";
 
 const cookieName = "__Host-rarr-local";
 const lifetime = 7 * 86400;
@@ -35,7 +36,8 @@ export async function localLogout(request: Request, env: Cloudflare.Env): Promis
 const htmlHeaders = { "content-type": "text/html; charset=utf-8", "cache-control": "private, no-store" };
 function form(message = "", status = 200) {
   // Only constant messages are passed here. Never interpolate supplied form values.
-  return new Response(`<!doctype html><html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>RaRRcord sign in</title><style>body{font:16px system-ui;background:#15171c;color:#eee;max-width:420px;margin:8vh auto;padding:20px}form{display:grid;gap:12px;background:#22252c;padding:20px;border-radius:12px;margin:18px 0}label{display:grid;gap:5px}input,button{font:inherit;padding:10px;border-radius:6px;border:1px solid #555}input{background:#15171c;color:#eee}button{background:#5865f2;color:white;cursor:pointer}a{color:#aeb6ff}</style><h1>RaRRcord</h1>${message ? `<p role="alert">${message}</p>` : ""}<form method="post" action="/signin-with-chatgpt"><h2>Sign in</h2><input type="hidden" name="action" value="login"><label>Username<input name="username" autocomplete="username" required maxlength="24"></label><label>Password<input type="password" name="password" autocomplete="current-password" required maxlength="128"></label><button>Sign in</button></form><form method="post" action="/signin-with-chatgpt"><h2>Create account</h2><input type="hidden" name="action" value="register"><label>Username<input name="username" autocomplete="username" required minlength="3" maxlength="24" pattern="[A-Za-z0-9_]+"></label><label>Password (at least 12 characters)<input type="password" name="password" autocomplete="new-password" required minlength="12" maxlength="128"></label><label>Registration code<input type="password" name="code" required maxlength="128" autocomplete="off"></label><button>Create account</button></form><p>Your sign-in username is your public display name. Never use a password as your username. Members require administrator approval.</p><a href="/privacy">Privacy</a></html>`, { status, headers: htmlHeaders });
+  // Both forms post to the current URL so a message destination survives sign-in.
+  return new Response(`<!doctype html><html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>RaRRcord sign in</title><style>body{font:16px system-ui;background:#15171c;color:#eee;max-width:420px;margin:8vh auto;padding:20px}form{display:grid;gap:12px;background:#22252c;padding:20px;border-radius:12px;margin:18px 0}label{display:grid;gap:5px}input,button{font:inherit;padding:10px;border-radius:6px;border:1px solid #555}input{background:#15171c;color:#eee}button{background:#5865f2;color:white;cursor:pointer}a{color:#aeb6ff}</style><h1>RaRRcord</h1>${message ? `<p role="alert">${message}</p>` : ""}<form method="post"><h2>Sign in</h2><input type="hidden" name="action" value="login"><label>Username<input name="username" autocomplete="username" required maxlength="24"></label><label>Password<input type="password" name="password" autocomplete="current-password" required maxlength="128"></label><button>Sign in</button></form><form method="post"><h2>Create account</h2><input type="hidden" name="action" value="register"><label>Username<input name="username" autocomplete="username" required minlength="3" maxlength="24" pattern="[A-Za-z0-9_]+"></label><label>Password (at least 12 characters)<input type="password" name="password" autocomplete="new-password" required minlength="12" maxlength="128"></label><label>Registration code<input type="password" name="code" required maxlength="128" autocomplete="off"></label><button>Create account</button></form><p>Your sign-in username is your public display name. Never use a password as your username. Members require administrator approval.</p><a href="/privacy">Privacy</a></html>`, { status, headers: htmlHeaders });
 }
 
 async function limitedForm(request: Request) {
@@ -103,7 +105,9 @@ export async function localAuthRoute(request: Request, env: Cloudflare.Env): Pro
     db.prepare("DELETE FROM local_sessions WHERE expires<=? OR token=?").bind(now, previous ? hash(previous) : ""),
     db.prepare("INSERT INTO local_sessions(token,username,expires) VALUES(?,?,?)").bind(hash(raw), username, now + lifetime * 1000),
   ]);
-  const headers = new Headers({ location: "/", "cache-control": "private, no-store" });
+  const requestedPath = new URL(request.url).searchParams.get("return_to");
+  const target = requestedPath?.startsWith("/?message=") && parseMessageQuery(new URLSearchParams(requestedPath.slice(2)).get("message"));
+  const headers = new Headers({ location: target ? messageLinkPath(target.channel,target.id) : "/", "cache-control": "private, no-store" });
   headers.append("set-cookie", cookie(raw, lifetime));
   headers.append("set-cookie", "__Host-rarr=; Path=/; HttpOnly; Secure; SameSite=Strict; Max-Age=0");
   return new Response(null, { status: 303, headers });
