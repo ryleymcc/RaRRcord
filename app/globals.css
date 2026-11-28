@@ -385,7 +385,11 @@ kbd{font:600 .78rem var(--font-body);padding:1px 6px;border:1px solid var(--edge
 .tile-actions button,.tile-actions .volume{display:flex;align-items:center;gap:6px;padding:5px 9px;border:0;border-radius:var(--r-sm);background:#111218d9;color:var(--text);font-size:.8rem}
 .tile-actions button:hover{background:#25262dee}
 .volume{display:flex;gap:6px;font-size:.8rem;align-items:center}
-.volume input{width:80px}
+.volume input{width:90px;accent-color:var(--accent)}
+.tile-actions .volume{padding:3px 9px 3px 3px}
+.tile-actions .volume .volume-mute{padding:3px 5px;background:transparent}
+.tile-actions .volume .volume-mute[aria-pressed="true"]{color:var(--red)}
+.volume-value{min-width:3.2em;text-align:right;font-variant-numeric:tabular-nums}
 .sr-only{position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0 0 0 0);white-space:nowrap}
 @media(hover:none){.tile-actions{opacity:1}}
 .call-bar{flex:none;display:flex;justify-content:center;gap:10px;flex-wrap:wrap;padding:12px 0 16px}

@@ -1,12 +1,13 @@
 "use client";
 import { Fragment,memo,useCallback,useEffect,useLayoutEffect,useRef,useState, type ClipboardEvent, type FormEvent, type ReactNode } from "react";
-import { AudioLines, Expand, HeadphoneOff, LayoutGrid, Maximize2, MonitorOff, PhoneOff, VideoOff, Volume2, ChevronDown, CircleHelp, Copy, CornerUpLeft, Ellipsis, Flag, Headphones, Hash, LockKeyhole, LogOut, Menu, MessageSquare, Mic, MicOff, MonitorUp, Paperclip, ArrowDown, Download, FileText, Pencil, Pin, Plus, Reply, Search, Send, Settings, Shield, Smile, SmilePlus, Trash2, Users, Video, X } from "lucide-react";
+import { AudioLines, Expand, HeadphoneOff, LayoutGrid, Maximize2, MonitorOff, PhoneOff, VideoOff, Volume2, VolumeX, Eye, EyeOff, ChevronDown, CircleHelp, Copy, CornerUpLeft, Ellipsis, Flag, Headphones, Hash, LockKeyhole, LogOut, Menu, MessageSquare, Mic, MicOff, MonitorUp, Paperclip, ArrowDown, Download, FileText, Pencil, Pin, Plus, Reply, Search, Send, Settings, Shield, Smile, SmilePlus, Trash2, Users, Video, X } from "lucide-react";
 import { ConfirmHost, Modal, confirmAction } from "./dialog";
 import { friendlyError } from "./friendly-error";
 import { useMedia } from "./use-media";
 import QuickSwitcher from "./quick-switcher";
 import { isImage, typingText, uploadWithProgress } from "./upload";
 import { playVoiceCue } from "./voice-sounds";
+import { boost, canBoost, loadScreenPreview, loadVolumes, maxVolume, saveScreenPreview, setVolume, streamVolumeKey } from "./user-volume";
 import { microphoneConstraints, processVoice, suppressionMode, suppressionModes, type VoiceProcessor } from "./noise-suppression";
 import { VoiceSession, codecs, type Call, type Feed, type Metrics, type Participant, type Signal } from "./rtc";
 import { request, defaults, qualities, type Channel, type Message, type Person, type Preferences, type Server } from "./ra-client";
@@ -109,17 +110,34 @@ function Media({feed,deaf,output,volume,video}:{feed:Feed;deaf:boolean;output:st
   useEffect(()=>{
     const el=element.current;
     if(!el)return;
-    el.srcObject=feed.stream; el.volume=volume;
+    el.srcObject=feed.stream;
+    // Above 100% the element stays muted (Chrome still needs it playing to decode remote audio) and a gain node plays it louder.
+    const release=!deaf&&volume>1?boost(feed.stream,volume,output):null;
+    el.muted=deaf||!!release; el.volume=Math.min(1,volume);
     if(output && "setSinkId" in el)void (el as HTMLMediaElement & {setSinkId(id:string):Promise<void>}).setSinkId(output).catch(()=>{});
     void el.play().catch(()=>{});
-  },[feed.stream,output,volume]);
-  return video?<video autoPlay playsInline muted={deaf} ref={node=>{element.current=node;}}/>:<audio autoPlay muted={deaf} ref={node=>{element.current=node;}}/>;
+    return ()=>release?.();
+  },[feed.stream,output,volume,deaf]);
+  return video?<video autoPlay playsInline muted ref={node=>{element.current=node;}}/>:<audio autoPlay muted ref={node=>{element.current=node;}}/>;
+}
+// Your own volume for one person (or their stream): 0–200%, remembered in this browser. The speaker icon mutes them for you only.
+function VolumeControl({label,value,output,change}:{label:string;value:number;output:string;change:(v:number)=>void}){
+  const last=useRef(value>0?value:1);
+  const top=canBoost(output)?maxVolume:1;
+  const percent=Math.round(value*100);
+  return <span className="volume">
+    <button type="button" className="volume-mute" aria-label={(value===0?"Unmute ":"Mute ")+label+" for you"} title={value===0?"Unmute for you":"Mute for you"} aria-pressed={value===0}
+      onClick={()=>{if(value===0)change(last.current);else{last.current=value;change(0);}}}>{value===0?<VolumeX size={15}/>:<Volume2 size={15}/>}</button>
+    <input type="range" min={0} max={top} step={0.05} value={Math.min(value,top)} aria-label={label} aria-valuetext={percent+"%"}
+      onChange={e=>{const v=+e.target.value;if(v>0)last.current=v;change(v);}} onDoubleClick={()=>change(1)}/>
+    <output className="volume-value">{percent}%</output>
+  </span>;
 }
 // One person or screen on the call stage. Video fills the tile; name, actions and fullscreen sit on top.
 function StageTile({name,uid,avatar=false,speaking=false,screen=false,live=false,stream,mirror=false,deaf,output,volume,actions}:{name:string;uid:string;avatar?:boolean;speaking?:boolean;screen?:boolean;live?:boolean;stream?:MediaStream;mirror?:boolean;deaf:boolean;output:string;volume:number;actions?:ReactNode}){
   const tile=useRef<HTMLDivElement>(null);
   return <div ref={tile} className={"stage-tile"+(screen?" screen":"")+(stream?" has-video":"")+(speaking?" speaking":"")+(mirror?" mirror":"")}>
-    {stream?<Media feed={{key:uid,peer:uid,kind:screen?"screen":"cam",stream}} deaf={deaf} output={output} volume={volume} video/>:<Avatar name={name} uid={uid} has={avatar}/>}
+    {stream?<Media feed={{key:uid,peer:uid,kind:screen?"screen":"cam",stream}} deaf={deaf} output={output} volume={volume} video/>:<Avatar name={name.replace(/ \(you\)$/,"")} uid={uid} has={avatar}/>}
     <div className="tile-label">{screen?<MonitorUp size={14}/>:null}<span>{name}</span>{live&&<b className="live-tag">LIVE</b>}</div>
     <div className="tile-actions">{actions}
       {stream&&<button type="button" aria-label={"Full screen: "+name} title="Full screen" onClick={()=>{if(document.fullscreenElement)void document.exitFullscreen();else void tile.current?.requestFullscreen().catch(()=>{});}}><Expand size={15}/></button>}
@@ -322,7 +340,10 @@ export default function Community(){
   const [rooms,setRooms]=useState<RoomMember[]>([]);
   const roomsAt=useRef(0);
   const cueState=useRef<{call:Call|null;uids:Set<string>|null}>({call:null,uids:null});
-  const [volumes,setVolumes]=useState<Record<string,number>>({});
+  const [volumes,setVolumes]=useState<Record<string,number>>(()=>typeof window==="undefined"?{}:loadVolumes());
+  const [screenPreview,setScreenPreview]=useState(()=>typeof window==="undefined"||loadScreenPreview());
+  const changeVolume=(key:string,value:number)=>setVolumes(v=>setVolume(v,key,value));
+  const previewScreen=(on:boolean)=>{saveScreenPreview(on);setScreenPreview(on);};
   const [stage,setStage]=useState(false);
   const [speaker,setSpeaker]=useState(false);
   const [dmUsers,setDmUsers]=useState<string[]>([]);
@@ -657,7 +678,12 @@ export default function Community(){
   const screens=feeds.filter(f=>f.kind==="screen");
   // Focus view puts whoever is talking first, so they get the large tile when nobody is sharing.
   const stagePeople=call?(speaker?[...call.participants].sort((a,b)=>Number(call.speaking(b.peer))-Number(call.speaking(a.peer))):call.participants):[];
-  const ownVoice=call?.local.get("cam");
+  const ownCam=call?.local.get("cam");
+  const ownScreen=screenPreview?call?.local.get("screen"):undefined;
+  // Volumes are saved per user, so a peer (one join of a call) is looked up to its user first.
+  const uidOf=(peer:string)=>call?.participants.find(p=>p.peer===peer)?.uid??peer;
+  const voiceVolume=(peer:string)=>volumes[uidOf(peer)]??1;
+  const streamVolume=(peer:string)=>volumes[streamVolumeKey(uidOf(peer))]??1;
   const bounded=ready===chatId?messages.slice(-350):[];
   const byId=new Map(bounded.map(m=>[m.id,m]));
   const unseen=awayFrom===null?0:bounded.filter(m=>m.id>awayFrom&&m.uid!==person?.id).length;
@@ -706,20 +732,23 @@ export default function Community(){
       {mainStage&&<div className="stage">
         {call?<><div className="stage-head"><div><h2>{callTitle}</h2><p>{call.participants.length===1?"Just you so far":call.participants.length+" connected"}</p></div>
           {(screens.length>0||call.participants.length>2)&&<button type="button" className="view-toggle" aria-pressed={speaker} onClick={()=>setSpeaker(!speaker)}>{speaker?<><LayoutGrid size={16}/>Grid view</>:<><Maximize2 size={16}/>Focus view</>}</button>}</div>
-          <div className={"stage-grid"+(speaker?" speaker":"")} data-count={Math.min(screens.length+call.participants.length,5)}>
+          <div className={"stage-grid"+(speaker?" speaker":"")} data-count={Math.min(screens.length+(ownScreen?1:0)+call.participants.length,5)}>
+            {ownScreen&&<StageTile key="own-screen" name="Your screen" uid={call.peer+"-screen"} screen live stream={ownScreen} deaf output={prefs.output} volume={0}
+              actions={<button type="button" onClick={()=>previewScreen(false)}><EyeOff size={15}/>Hide preview</button>}/>}
             {screens.map(f=>{const who=call.participants.find(p=>p.peer===f.peer);return <StageTile key={f.key} name={(who?.name??"Someone")+"’s screen"} uid={who?.uid??f.peer} screen
-              stream={f.stream} deaf={call.deaf} output={prefs.output} volume={volumes[f.peer]??1}
-              actions={<button type="button" onClick={()=>call.watch(f.peer,"screen",false)}><MonitorOff size={15}/>Stop watching</button>}/>;})}
+              stream={f.stream} deaf={call.deaf} output={prefs.output} volume={streamVolume(f.peer)}
+              actions={<><VolumeControl label={"Stream volume for "+(who?.name??"this screen")} value={streamVolume(f.peer)} output={prefs.output} change={v=>changeVolume(streamVolumeKey(uidOf(f.peer)),v)}/>
+                <button type="button" onClick={()=>call.watch(f.peer,"screen",false)}><MonitorOff size={15}/>Stop watching</button></>}/>;})}
             {stagePeople.map(participant=>{
               const you=participant.peer===call.peer;
-              const cam=you?ownVoice:feeds.find(f=>f.peer===participant.peer&&f.kind==="cam")?.stream;
+              const cam=you?ownCam:feeds.find(f=>f.peer===participant.peer&&f.kind==="cam")?.stream;
               return <StageTile key={participant.peer} name={participant.name+(you?" (you)":"")} uid={participant.uid} avatar={avatars.get(participant.uid)??false}
-                speaking={call.speaking(participant.peer)} stream={cam} mirror={you} deaf={you||call.deaf} output={prefs.output} volume={volumes[participant.peer]??1}
+                speaking={call.speaking(participant.peer)} stream={cam} mirror={you} deaf={you||call.deaf} output={prefs.output} volume={voiceVolume(participant.peer)}
                 live={!!participant.screen}
-                actions={you?null:<>
+                actions={you?(participant.screen&&call.local.has("screen")&&!screenPreview?<button type="button" onClick={()=>previewScreen(true)}><Eye size={15}/>Show my screen</button>:null):<>
                   {participant.cam?<button type="button" onClick={()=>call.watch(participant.peer,"cam",!call.watching(participant.peer,"cam"))}>{call.watching(participant.peer,"cam")?<><VideoOff size={15}/>Hide camera</>:<><Video size={15}/>Show camera</>}</button>:null}
                   {participant.screen&&!call.watching(participant.peer,"screen")?<button type="button" onClick={()=>call.watch(participant.peer,"screen",true)}><MonitorUp size={15}/>Show screen</button>:null}
-                  <label className="volume" title="Volume"><Volume2 size={15}/><span className="sr-only">Volume for {participant.name}</span><input type="range" min={0} max={1} step={0.05} value={volumes[participant.peer]??1} onChange={e=>setVolumes(v=>({...v,[participant.peer]:+e.target.value}))}/></label>
+                  <VolumeControl label={"Volume for "+participant.name} value={voiceVolume(participant.peer)} output={prefs.output} change={v=>changeVolume(participant.uid,v)}/>
                 </>}/>;
             })}
           </div>
@@ -788,7 +817,7 @@ export default function Community(){
         </div>}
       </section>}
       </div>
-      {call?.feeds.filter(f=>f.kind==="voice").map(f=><Media key={f.key} feed={f} deaf={call.deaf} output={prefs.output} video={false} volume={volumes[f.peer]??1}/>)}
+      {call?.feeds.filter(f=>f.kind==="voice").map(f=><Media key={f.key} feed={f} deaf={call.deaf} output={prefs.output} video={false} volume={voiceVolume(f.peer)}/>)}
     </main>
     {members&&<aside className="members-pane"><div className="members-title"><h2>Members</h2><span>{space?.people.length??""}</span></div>
       {!space&&<div className="skeleton-list members-skel" aria-label="Loading members">{[55,70,45,60].map((w,i)=><div key={i}><span className="skeleton avatar-skel"/><span className="skeleton" style={{width:w+"%"}}/></div>)}</div>}
