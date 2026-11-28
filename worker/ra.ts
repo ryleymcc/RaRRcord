@@ -1,3 +1,4 @@
+import { EMAIL_HEADER, ID_HEADER, signOutPath } from "./identity.ts";
 import { allow, dailyUploadBytes, readLimits } from "./limits.ts";
 
 type Value = string | number | null;
@@ -75,9 +76,10 @@ async function route(request:Request, env:Cloudflare.Env):Promise<Response> {
   const write=request.method==="POST";
   if (!write && request.method!=="GET") deny(405,"Method unsupported.");
   if (write && request.headers.get("origin")!==url.origin) deny(403,"This request must come from RaRRcord.");
-  const id=request.headers.get("oai-authenticated-user-id");
-  const email=request.headers.get("oai-authenticated-user-email");
-  if (!id || !email) deny(401,"Continue with ChatGPT to sign in.");
+  // Set only by worker/identity.ts after it verifies the sign-in.
+  const id=request.headers.get(ID_HEADER);
+  const email=request.headers.get(EMAIL_HEADER);
+  if (!id || !email) deny(401,"Sign in to use RaRRcord.");
   if (!write) {
     const bucket=path==="history" && q.get("search")?.trim() ? "search" : path;
     if (!allow(id+":"+bucket,readLimits[bucket]??60,now)) deny(429,"Please slow down.");
@@ -145,7 +147,7 @@ async function route(request:Request, env:Cloudflare.Env):Promise<Response> {
     }
     if (!user) deny(409,"Account initialization failed.");
     if (user.state!=="approved") return json({user:view(user),active:false});
-    if (rawSession && !await validSession(user)) deny(401,"Session revoked or expired. Sign out, then continue with ChatGPT again.");
+    if (rawSession && !await validSession(user)) deny(401,"Session revoked or expired. Sign out, then sign in again.");
     if (await validSession(user)) return json({user:view(user),active:true});
     const newSession=token();
     await db.batch([
@@ -157,7 +159,7 @@ async function route(request:Request, env:Cloudflare.Env):Promise<Response> {
   if (path==="logout" && write) {
     if (sessionKey) await run("DELETE FROM sessions WHERE uid=? AND token=?",id,sessionKey);
     if (user) await run("DELETE FROM voice WHERE uid=?",id);
-    return json({},200,{"set-cookie":cookie("",0)});
+    return json({signOut:signOutPath(env)},200,{"set-cookie":cookie("",0)});
   }
   if (!user || user.state!=="approved" || !live) deny(403,"Your RaRRcord session does not have access.");
   const account=user;
