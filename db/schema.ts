@@ -9,7 +9,10 @@ export const users = table("users", {
 export const sessions = table("sessions", {
   token: text().primaryKey(), uid: text().notNull(), epoch: integer().notNull(), expires: integer().notNull(),
 }, t => [index("sessions_expiry").on(t.uid, t.expires)]);
-export const servers = table("servers", { id: text().primaryKey(), name: text().notNull(), icon: text(), picture: text() });
+// background is an R2 key; background_fill is "" or a "#rrggbb" colour or "preset:<name>" gradient;
+// background_dim is how strongly (0-90 %) the chat colour is laid over it, to keep text readable.
+export const servers = table("servers", { id: text().primaryKey(), name: text().notNull(), icon: text(), picture: text(),
+  background: text(), background_fill: text().notNull().default(""), background_dim: integer().notNull().default(60) });
 export const members = table("members", { server: text().notNull(), uid: text().notNull(), role: text().notNull().default("member"),
   // Timed out until this time (ms since the epoch); 0 when not timed out.
   timeout: integer().notNull().default(0) },
