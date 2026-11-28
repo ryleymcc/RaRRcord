@@ -10,7 +10,7 @@ import { playVoiceCue } from "./voice-sounds";
 import { canBoost, route, setGain, type Route, loadScreenPreview, loadVolumes, maxVolume, saveScreenPreview, setVolume, streamVolumeKey } from "./user-volume";
 import { microphoneConstraints, processVoice, suppressionMode, suppressionModes, type VoiceProcessor } from "./noise-suppression";
 import { VoiceSession, codecs, type Call, type Feed, type Metrics, type Participant, type Signal } from "./rtc";
-import { request, defaults, qualities, type Channel, type Message, type Person, type Preferences, type Server } from "./ra-client";
+import { request, defaults, qualities, serverPictureUrl, type Channel, type Message, type Person, type Preferences, type Server } from "./ra-client";
 import Admin from "./ra-admin";
 import { DiagnosticCharts, WebRtcInternals } from "./diagnostic-charts";
 import { diagnosticSample, type DiagnosticSample } from "./diagnostic-data";
@@ -750,7 +750,7 @@ export default function Community(){
       <hr/>
       {space?.servers.map(s=><button className={"server-pill "+(s.id===server?"selected":"")} key={s.id} title={s.name} aria-label={s.name} onClick={()=>{
         setServer(s.id);setSelected(space.channels.find(c=>c.server===s.id&&c.kind==="text")?.id??"");setStage(false);
-      }}>{s.icon||initials(s.name)}</button>)}
+      }}>{s.picture?<img src={serverPictureUrl(s.id,s.picture)} alt=""/>:s.icon||initials(s.name)}</button>)}
       {person?.role==="admin"&&<button className="server-pill add" aria-label="Manage servers" title="Manage servers" onClick={()=>setModal("admin")}><Plus size={20}/></button>}
       <div className="rail-bottom"><IconButton label="Diagnostics" onClick={()=>setModal("diagnostics")}><AudioLines size={19}/></IconButton><IconButton label="Help" onClick={()=>setModal("help")}><CircleHelp size={19}/></IconButton></div>
     </nav>

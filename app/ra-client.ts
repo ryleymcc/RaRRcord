@@ -1,6 +1,8 @@
 export type Person = {id:string; name:string; username:string; avatar?:boolean; role:string; state?:string; status:string};
 export type Channel = {id:string; server:string|null; kind:string; name:string; category:string; description:string; permission:string; position:number; unread:number;allowed?:string[]};
-export type Server = {id:string; name:string; icon?:string};
+export type Server = {id:string; name:string; icon?:string; picture?:string|null};
+// The version tag changes whenever the picture does, so a new upload is not hidden by the browser cache.
+export const serverPictureUrl=(id:string,version:string)=>"/api/ra/servericon?key="+encodeURIComponent(id)+"&v="+encodeURIComponent(version);
 export type Message = {id:number; uid:string; name:string; username:string; has_avatar:boolean; body:string; created:number; edited?:number; deleted:number; pinned:number; reply?:number; attachment?:string; filename?:string; reactions?:string; my_reactions?:string};
 export type Preferences = {
   input:string; output:string; camera:string; sensitivity:number; noise:boolean; echo:boolean; gain:boolean;

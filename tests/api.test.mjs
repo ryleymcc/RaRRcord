@@ -255,6 +255,42 @@ test("deleting a channel or server removes its messages and files",async()=>{
   await owner("history?channel="+channel,{expect:404});
 });
 
+test("only administrators set server pictures and only members of that server can load them",async()=>{
+  const {visitor,objects}=fixture();
+  const owner=visitor("owner"), member=visitor("m");
+  await owner("enroll",{input:{username:"owner"}});
+  await member("enroll",{input:{username:"mmm"}});
+  await owner("admin",{input:{action:"account",target:"m",state:"approved",role:"member"}});
+  await member("enroll",{input:{}});
+  const {id:server}=await owner("admin",{input:{action:"server",name:"Pics"}});
+  const png=()=>new File([new Uint8Array([137,80,78,71,13,10,26,10,0,0])],"icon.png");
+  const picture=(file=png())=>{const form=new FormData();form.set("server",server);form.set("file",file);return form;};
+  await member("servericon",{input:picture(),expect:403});
+  await owner("servericon",{input:picture(new File(["not an image"],"icon.txt")),expect:415});
+  const missing=picture();missing.set("server","nope");
+  await owner("servericon",{input:missing,expect:404});
+  assert.equal(objects.size,0);
+  await owner("servericon",{input:picture()});
+  assert.equal(objects.size,1);
+  const listed=(await owner("workspace")).servers.find(s=>s.id===server);
+  assert.equal(listed.picture.length,8);
+  await owner("servericon?key="+server,{contentType:"image/png"});
+  // The picture is only for people who can see the server.
+  await member("servericon?key="+server,{expect:404});
+  // Replacing it removes the old file.
+  await owner("servericon",{input:picture()});
+  assert.equal(objects.size,1);
+  await owner("admin",{input:{action:"server_picture_remove",target:server}});
+  assert.equal(objects.size,0);
+  await owner("servericon?key="+server,{expect:404});
+  assert.equal((await owner("workspace")).servers.find(s=>s.id===server).picture,null);
+  // Deleting the server removes its picture too.
+  await owner("servericon",{input:picture()});
+  assert.equal(objects.size,1);
+  await owner("admin",{input:{action:"server_delete",target:server}});
+  assert.equal(objects.size,0);
+});
+
 test("Cloudflare TURN credentials are fetched for calls and port 53 addresses are dropped",async()=>{
   const {visitor,env}=fixture();
   env.RARRCORD_TURN_KEY_ID="key1";env.RARRCORD_TURN_KEY_TOKEN="secret";
