@@ -1,6 +1,6 @@
 "use client";
 import { Fragment,memo,useCallback,useEffect,useLayoutEffect,useRef,useState, type ClipboardEvent, type FormEvent, type ReactNode } from "react";
-import { AudioLines, Bell, Camera, ChevronDown, CircleHelp, Headphones, Hash, LockKeyhole, LogOut, Menu, MessageSquare, Mic, MicOff, MonitorUp, Paperclip, Plus, Search, Send, Settings, Shield, Smile, Users, Video, X } from "lucide-react";
+import { AudioLines, Camera, ChevronDown, CircleHelp, Headphones, Hash, LockKeyhole, LogOut, Menu, MessageSquare, Mic, MicOff, MonitorUp, Paperclip, Pin, Plus, Search, Send, Settings, Shield, Smile, Users, Video, X } from "lucide-react";
 import { playVoiceCue } from "./voice-sounds";
 import { microphoneConstraints, processVoice, suppressionMode, suppressionModes, type VoiceProcessor } from "./noise-suppression";
 import { VoiceSession, codecs, type Call, type Feed, type Metrics, type Participant, type Signal } from "./rtc";
@@ -18,10 +18,12 @@ type Update={messages?:Message[];cursor?:number;typing?:{name:string}[];voice?:P
 const day=(v:number)=>new Date(v).toLocaleDateString(undefined,{weekday:"long",month:"long",day:"numeric"});
 const clock=(v:number)=>new Date(v).toLocaleTimeString(undefined,{hour:"numeric",minute:"2-digit"});
 const initials=(s:string)=>s.trim().split(/\s+/).slice(0,2).map(x=>x[0]).join("").toUpperCase();
+const statuses=[["online","Online"],["idle","Idle"],["dnd","Do not disturb"],["offline","Invisible"]] as const;
+const statusLabel=(s:string)=>statuses.find(x=>x[0]===s)?.[1]??s;
 const avatarUrl=(id:string)=>"/api/ra/avatar?key="+encodeURIComponent(id);
 function Avatar({name,uid,has,status}:{name:string;uid:string;has?:boolean;status?:string}){
   const color=[...uid].reduce((sum,c)=>sum+c.charCodeAt(0),0)%6;
-  return <span className={"avatar hue-"+color}>{has?<img src={avatarUrl(uid)} alt=""/>:initials(name)}{status&&<i className={"presence "+status} title={status}/>}</span>;
+  return <span className={"avatar hue-"+color}>{has?<img src={avatarUrl(uid)} alt=""/>:initials(name)}{status&&<i className={"presence "+status} title={statusLabel(status)}/>}</span>;
 }
 type VoiceMember={uid:string;name:string;avatar:boolean;live:boolean;cam:boolean;speaking:boolean};
 function VoiceMembers({members}:{members:VoiceMember[]}){
@@ -43,8 +45,8 @@ const MessageRow=memo(function MessageRow({m,previous,replyName,me,admin,actions
       {!joined&&<Avatar name={m.name} uid={m.uid} has={m.has_avatar}/>}
       <div className="message-content">
         {m.reply&&<span className="reply-label">Replying to {replyName??"an earlier message"}</span>}
-        {!joined&&<div className="byline"><strong>{m.name}</strong><time dateTime={new Date(m.created).toISOString()}>{clock(m.created)}</time>{!!m.pinned&&<span className="tag">Pinned</span>}</div>}
-        {m.body&&<div className="text-body">{markdown(m.body)}{m.edited&&<small> (edited)</small>}</div>}
+        {!joined&&<div className="byline"><strong>{m.name}</strong><time dateTime={new Date(m.created).toISOString()}>{clock(m.created)}</time>{!!m.edited&&<span className="edited">(edited)</span>}{!!m.pinned&&<span className="tag">Pinned</span>}</div>}
+        {m.body&&<div className="text-body">{markdown(m.body)}{!!m.edited&&joined&&<small> (edited)</small>}</div>}
         {m.attachment&&<Attachment message={m}/>}
         {reacts.length>0&&<div className="reaction-row">{reacts.map(([emoji,count])=><button key={emoji} type="button" aria-pressed={mine.has(emoji)} onClick={()=>void actions.action("react",m,{emoji,remove:mine.has(emoji)})}>{emoji} {count}</button>)}</div>}
       </div>
@@ -65,10 +67,17 @@ function inline(text:string) {
   return text.split(/(\*\*[^*\n]+\*\*|_[^_\n]+_|\x60[^\x60\n]+\x60|@[a-z0-9_]+)/gi).map((s,i)=>s.startsWith("**")?<strong key={i}>{s.slice(2,-2)}</strong>:s.startsWith("_")&&s.endsWith("_")?<em key={i}>{s.slice(1,-1)}</em>:s.startsWith("\x60")?<code key={i}>{s.slice(1,-1)}</code>:s.startsWith("@")?<span key={i} className="mention">{s}</span>:s);
 }
 function markdown(text:string){
-  return text.split(/\x60\x60\x60/).map((part,i)=>{
-    if(i%2===0)return <span key={i}>{inline(part)}</span>;
+  const parts=text.split(/\x60\x60\x60/);
+  return parts.map((part,i)=>{
+    // Newlines touching a code fence belong to the fence, not to the text around it.
+    if(i%2===0){
+      let prose=part;
+      if(i>0)prose=prose.replace(/^\r?\n/,"");
+      if(i<parts.length-1)prose=prose.replace(/\r?\n$/,"");
+      return prose&&<span key={i}>{inline(prose)}</span>;
+    }
     const start=part.indexOf("\n");
-    const body=start<0?part:part.slice(start+1);
+    const body=(start<0?part:part.slice(start+1)).replace(/\r?\n$/,"");
     return <pre key={i}><code>{body.split(/(".*?"|'.*?'|\/\/[^\n]*|\b(?:const|let|function|return|if|else|class|import|export|async|await|true|false|null|def|print)\b|\b\d+\b)/g).map((s,j)=>j%2?<span className="syntax" key={j}>{s}</span>:s)}</code></pre>;
   });
 }
@@ -193,7 +202,7 @@ function UserSettings({person,prefs,limit,save,report}:{person:Person;prefs:Pref
     try{await request("profile",{name,status,prefs:form});save();}catch(e){report((e as Error).message);}
   }}>
     <fieldset><legend>Profile</legend><label>Display name<input required maxLength={40} value={name} onChange={e=>setName(e.target.value)}/></label>
-      <label>Status<select value={status} onChange={e=>setStatus(e.target.value)}>{["online","idle","dnd","offline"].map(s=><option value={s} key={s}>{s==="dnd"?"Do not disturb":s}</option>)}</select></label>
+      <label>Status<select value={status} onChange={e=>setStatus(e.target.value)}>{statuses.map(([s,label])=><option value={s} key={s}>{label}</option>)}</select></label>
       <label>Profile picture<input type="file" accept="image/png,image/jpeg,image/webp,image/gif" onChange={async(e)=>{
         const file=e.target.files?.[0];if(!file)return;const body=new FormData();body.set("file",file);
         try{await request("avatar",body);report("Profile picture updated.");}catch(e){report((e as Error).message);}
@@ -517,7 +526,7 @@ export default function Community(){
   const names=new Map(bounded.map(m=>[m.id,m.name]));
   return <div className={"assembly "+(members?"with-members ":"")+(mobile?"mobile-nav ":"")+(prefs.compact?"compact":"")}>
     <nav className="rail" aria-label="Servers">
-      <button className="mark" aria-label="RaRRcord home" onClick={()=>{setServer("community");setSelected("general");setStage(false);}}>R</button>
+      <button className="mark" aria-label="RaRRcord home" onClick={()=>{const home=space?.servers[0]?.id??"community";setServer(home);setSelected(space?.channels.find(c=>c.server===home&&c.kind==="text")?.id??"");setStage(false);}}>R</button>
       <hr/>
       {space?.servers.map(s=><button className={"server-pill "+(s.id===server?"selected":"")} key={s.id} title={s.name} aria-label={s.name} onClick={()=>{
         setServer(s.id);setSelected(space.channels.find(c=>c.server===s.id&&c.kind==="text")?.id??"");setStage(false);
@@ -531,7 +540,7 @@ export default function Community(){
         {groups.map(group=><details key={group} open><summary><ChevronDown size={14}/>{group}</summary>{channels.filter(c=>(c.category||"Channels")===group).map(c=><Fragment key={c.id}><button className={"channel "+(selected===c.id?"selected":"")} onClick={()=>choose(c)}>
           {c.kind==="voice"?<AudioLines size={17}/>:c.kind==="private"?<LockKeyhole size={15}/>:<Hash size={17}/>}<span>{c.name}</span>{c.unread>0&&chatId!==c.id&&<b className="badge">{c.unread>99?"99+":c.unread}</b>}{call?.channel===c.id&&<i className="voice-dot"/>}
         </button>{c.kind==="voice"&&<VoiceMembers members={membersOf(c.id)}/>}</Fragment>)}</details>)}
-        <button className="channel dm-button" onClick={()=>{setDmUsers([]);setModal("dm");}}><Plus size={16}/>New direct message</button>
+        <button className="channel dm-button" onClick={()=>{setDmUsers([]);setModal("dm");}}><Plus size={16}/><span>New direct message</span></button>
       </div>
       {call&&<div className="voice-status"><div><b><i className="voice-dot"/> Voice connected</b><span>{callTitle}</span></div><IconButton label="Disconnect" onClick={()=>voice.disconnect()}><LogOut size={18}/></IconButton></div>}
       <footer className="profile">
@@ -549,7 +558,7 @@ export default function Community(){
         <div className="top-actions">
           {call&&!mainStage&&<button className="subtle" onClick={()=>{setFind("");setPinned(false);setStage(true);}}>View call</button>}
           {mainStage&&voiceRoom&&<button type="button" className={"sidechat-toggle"+(sidechatOpen?" active":"")} aria-expanded={sidechatOpen} aria-controls={sidechatOpen?"voice-sidechat":undefined} onClick={()=>setSidechat(sidechatOpen?"":voiceRoom.id)}><MessageSquare size={17}/><span>Sidechat</span>{!sidechatOpen&&voiceRoom.unread>0&&<b className="badge">{Math.min(voiceRoom.unread,99)}{voiceRoom.unread>99?"+":""}</b>}</button>}
-          {!mainStage&&<><label className="search"><Search size={16}/><input aria-label="Search messages" value={find} placeholder="Search messages" onChange={e=>setFind(e.target.value)}/></label><IconButton label="Pinned messages" active={pinned} onClick={()=>setPinned(!pinned)}><Bell size={19}/></IconButton></>}
+          {!mainStage&&<><label className="search"><Search size={16}/><input aria-label="Search messages" value={find} placeholder="Search messages" onChange={e=>setFind(e.target.value)}/></label><IconButton label="Pinned messages" active={pinned} onClick={()=>setPinned(!pinned)}><Pin size={19}/></IconButton></>}
           <IconButton label="Toggle member list" active={members} onClick={()=>setMembers(!members)}><Users size={20}/></IconButton>
           {person?.role==="admin"&&<IconButton label="Administration" onClick={()=>setModal("admin")}><Shield size={19}/></IconButton>}
         </div>
