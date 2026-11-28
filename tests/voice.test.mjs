@@ -183,3 +183,27 @@ test("a rapid switch supersedes an in-flight join, and a rejected join never ope
   assert.equal(constraints.length,1);
   assert.deepEqual(errors,["Voice room unavailable."]);
 });
+
+test("cameras and screen shares open automatically, and stopping one holds until that share ends",async t=>{
+  const {voice,requests}=fixture(t);
+  await voice.join("general-voice",defaults,0);
+  await settle();
+  const call=voice.call;
+  const subscriptions=()=>requests.filter(({path})=>path.endsWith("/signal")).map(({body})=>body.data).filter(data=>data.type==="subscribe");
+  await call.update([{...remote,screen:1}],[]);
+  assert.equal(call.watching(remote.peer,"screen"),true);
+  assert.equal(call.watching(remote.peer,"cam"),false);
+  await call.update([{...remote,screen:1,cam:1}],[]);
+  assert.equal(call.watching(remote.peer,"cam"),true);
+  call.watch(remote.peer,"screen",false);
+  await call.update([{...remote,screen:1,cam:1}],[]);
+  assert.equal(call.watching(remote.peer,"screen"),false);
+  await call.update([{...remote,cam:1}],[]);
+  await call.update([{...remote,cam:1,screen:1}],[]);
+  assert.equal(call.watching(remote.peer,"screen"),true);
+  await call.update([remote],[]);
+  assert.equal(call.watching(remote.peer,"cam"),false);
+  assert.equal(call.watching(remote.peer,"screen"),false);
+  assert.deepEqual(subscriptions().map(({medium,active})=>medium+":"+active),["screen:true","cam:true","screen:false","screen:true","cam:false","screen:false"]);
+  voice.disconnect();
+});
