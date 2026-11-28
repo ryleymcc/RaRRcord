@@ -59,6 +59,11 @@ input[type=file]{max-width:100%}
 .brand-mark,.mark{display:grid;place-items:center;width:48px;height:48px;font:700 1.9rem var(--font-display);background:var(--accent-strong);color:var(--accent-ink);border:0;border-radius:var(--r-lg)}
 .mark{font-size:1.6rem;border-radius:16px;padding:0;transition:border-radius .15s,background-color .15s}
 .mark:hover{background:var(--accent-hover)}
+.mark{overflow:hidden}
+.mark:has(img){background:transparent}
+.mark img,.app-logo-preview img{width:100%;height:100%;object-fit:cover;display:block}
+.app-logo{display:grid;gap:10px;padding-bottom:14px;border-bottom:1px solid var(--edge)}
+.app-logo-preview{display:grid;place-items:center;width:48px;height:48px;flex:none;overflow:hidden;border-radius:16px;background:var(--accent-strong);color:#fff;font:700 1.6rem var(--font-display)}
 .brand-mark{box-shadow:0 0 34px #5865f245}
 .form-error{color:var(--danger);line-height:1.4}
 .assembly{height:100dvh;display:grid;grid-template-columns:72px 240px minmax(0,1fr);overflow:hidden;background:var(--rail)}

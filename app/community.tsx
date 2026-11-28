@@ -11,13 +11,13 @@ import { cleanAnnouncements, joinAnnouncement, playVoiceCue, speakAnnouncement }
 import { canBoost, route, setGain, type Route, loadScreenPreview, loadVolumes, maxVolume, saveScreenPreview, setVolume, streamVolumeKey } from "./user-volume";
 import { microphoneConstraints, processVoice, suppressionMode, suppressionModes, type VoiceProcessor } from "./noise-suppression";
 import { VoiceSession, codecs, type Call, type Feed, type Metrics, type Participant, type Signal } from "./rtc";
-import { request, defaults, qualities, serverPictureUrl, serverBackground, type Channel, type Message, type Person, type Preferences, type Server } from "./ra-client";
+import { request, defaults, qualities, appLogoUrl, serverPictureUrl, serverBackground, type Channel, type Message, type Person, type Preferences, type Server } from "./ra-client";
 import Admin from "./ra-admin";
 import { DiagnosticCharts, WebRtcInternals } from "./diagnostic-charts";
 import { diagnosticSample, type DiagnosticSample } from "./diagnostic-data";
 import EmojiPicker from "./emoji-picker";
 
-type Workspace={servers:Server[]; channels:Channel[]; people:Person[]; settings:{key:string;value:string}[];prefs:Partial<Preferences>;moderates?:string[];timeouts?:{server:string;uid:string;timeout:number}[]};
+type Workspace={servers:Server[]; channels:Channel[]; logo?:string|null; people:Person[]; settings:{key:string;value:string}[];prefs:Partial<Preferences>;moderates?:string[];timeouts?:{server:string;uid:string;timeout:number}[]};
 type Auth={user:Person|null;active:boolean;ownerConfigured?:boolean};
 type History={messages:Message[];cursor:number};
 type RoomMember={channel:string;uid:string;name:string;has_avatar:boolean;cam:number;screen:number;joined?:number};
@@ -394,6 +394,12 @@ export default function Community({localAuth=false}:{localAuth?:boolean}={}){
   const previewScreen=(on:boolean)=>{saveScreenPreview(on);setScreenPreview(on);};
   const [stage,setStage]=useState(false);
   const [serverMenu,setServerMenu]=useState(false);
+  // The browser tab shows the app logo once an administrator has uploaded one.
+  const logoVersion=space?.logo;
+  useEffect(()=>{
+    const link=document.querySelector<HTMLLinkElement>("link[rel~=icon]")??Object.assign(document.head.appendChild(document.createElement("link")),{rel:"icon"});
+    link.href=logoVersion?appLogoUrl(logoVersion):"/favicon.svg";
+  },[logoVersion]);
   const [speaker,setSpeaker]=useState(false);
   const [dmUsers,setDmUsers]=useState<string[]>([]);
   const [hasMore,setHasMore]=useState(true);
@@ -792,7 +798,7 @@ export default function Community({localAuth=false}:{localAuth?:boolean}={}){
   const sheetOpen=mobile||(!wide&&membersSheet);
   return <div className={"assembly "+(members?"with-members ":"")+(mobile?"mobile-nav ":"")+(prefs.compact?"compact":"")}>
     <nav className="rail" aria-label="Servers">
-      <div className="rail-item"><button className="mark" aria-label="RaRRcord home" title="Home" onClick={()=>{const home=space?.servers[0]?.id??"community";setServer(home);setSelected(space?.channels.find(c=>c.server===home&&c.kind==="text")?.id??"");setStage(false);}}>R</button></div>
+      <div className="rail-item"><button className="mark" aria-label="RaRRcord home" title="Home" onClick={()=>{const home=space?.servers[0]?.id??"community";setServer(home);setSelected(space?.channels.find(c=>c.server===home&&c.kind==="text")?.id??"");setStage(false);}}>{space?.logo?<img src={appLogoUrl(space.logo)} alt=""/>:"R"}</button></div>
       <hr/>
       {space?.servers.map(s=>{
         // A white pill marks the open server; a short one marks servers with unread messages.
