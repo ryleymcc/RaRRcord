@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { defaults } from "../app/ra-client.ts";
-import { defaultBitrateKbps, displayMediaOptions, encoderFrameRate, screenShareSettings, applyNativeCapture, videoCodecPreferences } from "../app/screen-share.ts";
+import { defaultBitrateKbps, displayMediaOptions, encoderFrameRate, frameRateSteps, governFrameRate, previewTrack, screenShareSettings, startGovernor, applyNativeCapture, videoCodecPreferences } from "../app/screen-share.ts";
 
 test("the default profile captures 1080p at 60 FPS and keeps motion smooth", () => {
   const settings = screenShareSettings(defaults,0);
@@ -72,6 +72,7 @@ test("display capture asks for system audio without voice processing", () => {
   assert.deepEqual(options.audio,{echoCancellation:false,noiseSuppression:false,autoGainControl:false});
   assert.equal(options.systemAudio,"include");
   assert.equal(options.selfBrowserSurface,"exclude");
+  assert.equal(options.video.displaySurface,"monitor");
 });
 
 test("encoders share a frame budget once three or more people watch", () => {
@@ -93,4 +94,54 @@ test("native capture uses the surface's resolution but keeps the profile's frame
     applyConstraints:async value=>{constraints=value;},
   });
   assert.deepEqual(constraints,{width:{ideal:3440},height:{ideal:1440},frameRate:{ideal:60,max:60}});
+});
+
+test("presets adapt and the governor's step caps the encoder", () => {
+  const smooth=screenShareSettings(defaults,0);
+  assert.equal(smooth.adaptive,true);
+  assert.equal(screenShareSettings({...defaults,screenQuality:"custom"},0).adaptive,false);
+  assert.equal(encoderFrameRate(smooth,60,1,45),45);
+  assert.equal(encoderFrameRate(smooth,60,1,undefined),60);
+  assert.equal(encoderFrameRate(smooth,60,4,45),30);
+});
+
+test("the governor starts at 60 without a hardware encoder that keeps up", () => {
+  assert.deepEqual(frameRateSteps(144),[144,120,90,60,45,30]);
+  assert.deepEqual(frameRateSteps(60),[60,45,30]);
+  assert.equal(startGovernor(144,[{mimeType:"video/H264",smooth:true,powerEfficient:true}]).fps,144);
+  assert.equal(startGovernor(144,[{mimeType:"video/H264",smooth:false,powerEfficient:false}]).fps,60);
+  assert.equal(startGovernor(144,[]).fps,144);
+});
+
+test("the governor sheds frames quickly and adds them back slowly", () => {
+  const clean={cpuLimited:false,software:false,encodeMs:2};
+  const strained={cpuLimited:true,software:false,encodeMs:2};
+  let g=startGovernor(60,[]);
+  g=governFrameRate(g,strained,0);
+  assert.equal(g.fps,60,"one strained sample is not enough");
+  g=governFrameRate(g,strained,2000);
+  assert.equal(g.fps,45);
+  // Slow encodes count as strain too: 20 ms per frame is over budget at 45 FPS.
+  g=governFrameRate(g,{...clean,encodeMs:20},4000);
+  g=governFrameRate(g,{...clean,encodeMs:20},6000);
+  assert.equal(g.fps,30);
+  g=governFrameRate(governFrameRate(g,strained,8000),strained,10000);
+  assert.equal(g.fps,30,"30 is the floor");
+  for(let i=0;i<30;i++)g=governFrameRate(g,clean,12000+i*2000);
+  assert.equal(g.fps,30,"held for two minutes after a drop");
+  for(let i=0;i<30;i++)g=governFrameRate(g,clean,140000+i*2000);
+  assert.equal(g.fps,45);
+});
+
+test("a software encoder never runs above 60 FPS", () => {
+  const g=governFrameRate(startGovernor(144,[]),{cpuLimited:false,software:true,encodeMs:1},0);
+  assert.equal(g.fps,60);
+});
+
+test("the self preview is a low-rate clone", async () => {
+  let applied;
+  const clone={applyConstraints:async c=>{applied=c;}};
+  const result=await previewTrack({clone:()=>clone});
+  assert.equal(result,clone);
+  assert.deepEqual(applied,{frameRate:{max:10},height:{max:540}});
 });

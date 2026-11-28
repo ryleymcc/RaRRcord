@@ -42,6 +42,8 @@ export function screenShareSettings(preferences: Preferences, adminBitrate: numb
     // Motion keeps the frame rate and lets resolution drop under load; detail keeps text sharp.
     degradation: (hint === "detail" ? "maintain-resolution" : "maintain-framerate") as RTCDegradationPreference,
     codec: profile === "custom" ? preferences.codec : profile === "smooth" ? "smooth" : "quality",
+    // Presets shed frames when the encoder runs out of CPU; custom is taken as asked.
+    adaptive: profile !== "custom",
     width, height, fps,
   };
 }
@@ -53,11 +55,47 @@ const encodeBudget = 120;
 // The track reports its real frame rate once capture starts; the encoder ceiling follows it down so a
 // 30 Hz surface does not reserve bitrate for frames it never makes, but never above the profile's cap.
 // With three or more viewers each encode is held to an even share of the budget, but not below 30 FPS.
-export function encoderFrameRate(profile: ScreenProfile, captured?: number, viewers = 1) {
-  let fps = profile.frameRateCap;
+// `governed` is the governor's current step (see governFrameRate), when it has lowered the rate.
+export function encoderFrameRate(profile: ScreenProfile, captured?: number, viewers = 1, governed?: number) {
+  let fps = Math.min(profile.frameRateCap, governed ?? Infinity);
   if (captured && Number.isFinite(captured) && captured > 0) fps = Math.min(fps, Math.round(captured));
   if (viewers > 2) fps = Math.min(fps, Math.max(30, Math.floor(encodeBudget / viewers)));
   return fps;
+}
+
+// Frame-rate steps the share moves between when the sharer's PC is short of CPU time.
+const steps = [144, 120, 90, 60, 45, 30];
+export function frameRateSteps(top: number) {
+  return [top, ...steps.filter(n => n < top)];
+}
+
+// What the senders reported over the last two seconds, across every viewer's encoder.
+export type EncoderSample = {cpuLimited:boolean; encodeMs?:number; software:boolean};
+export type Governor = {fps:number; top:number; strained:number; calm:number; heldUntil:number};
+
+export function startGovernor(top: number, probed: Probe[]): Governor {
+  // Without a hardware encoder that says it keeps up at this rate, start no higher than 60.
+  const hardware = probed.some(p => p.powerEfficient && p.smooth);
+  const fps = hardware || probed.length === 0 ? top : Math.min(top, 60);
+  return {fps, top, strained:0, calm:0, heldUntil:0};
+}
+
+// Sheds frames fast (two strained samples) and adds them back slowly (a minute clean, and never
+// within two minutes of a drop), so the share does not see-saw, which looks worse than a lower rate.
+export function governFrameRate(state: Governor, sample: EncoderSample, now: number): Governor {
+  const ladder = frameRateSteps(state.top);
+  const at = Math.max(0, ladder.indexOf(state.fps));
+  const budget = 1000 / state.fps;
+  const strained = sample.cpuLimited || (sample.encodeMs !== undefined && sample.encodeMs > budget * 0.75);
+  if (sample.software && state.fps > 60) return {...state, fps: 60, strained: 0, calm: 0, heldUntil: now + 120000};
+  if (strained) {
+    const count = state.strained + 1;
+    if (count >= 2 && at < ladder.length - 1) return {...state, fps: ladder[at + 1], strained: 0, calm: 0, heldUntil: now + 120000};
+    return {...state, strained: count, calm: 0};
+  }
+  const calm = state.calm + 1;
+  if (calm >= 30 && at > 0 && now >= state.heldUntil) return {...state, fps: ladder[at - 1], strained: 0, calm: 0};
+  return {...state, strained: 0, calm};
 }
 
 type Probe = {mimeType:string; smooth:boolean; powerEfficient:boolean};
@@ -83,6 +121,7 @@ export function probeEncoders(width: number, height: number, fps: number, bitrat
   return probe;
 }
 
+export type { Probe };
 export function videoCodecPreferences<T extends {mimeType:string}>(codecs: T[], preference: string, probed: Probe[] = []) {
   const order = preference === "quality" ? qualityOrder : preference === "smooth" ? smoothOrder : ["video/" + preference.toLowerCase()];
   const known = new Map(probed.map(p => [p.mimeType.toLowerCase(), p]));
@@ -114,9 +153,18 @@ export async function applyNativeCapture(track: MediaStreamTrack, fps = presetFp
   if (apply) await track.applyConstraints(constraints);
 }
 
+// When you do show your own preview, it only needs to show what you are sharing, not every frame.
+// A clone at a low rate and size keeps the browser from drawing a second full-rate video beside your game.
+export async function previewTrack(track: MediaStreamTrack) {
+  const clone = track.clone();
+  await clone.applyConstraints({frameRate:{max:10}, height:{max:540}}).catch(() => {});
+  return clone;
+}
+
 // Display audio is game or video sound, not a voice: browser voice processing only harms it.
 export const displayMediaOptions = (profile: ScreenProfile) => ({
-  video: profile.capture,
+  // Whole-screen capture of a borderless game is the cheapest path on Windows, so the picker opens on it.
+  video: {...profile.capture, displaySurface: "monitor"},
   audio: {echoCancellation:false, noiseSuppression:false, autoGainControl:false},
   systemAudio: "include",
   selfBrowserSurface: "exclude",

@@ -1,7 +1,7 @@
 import { request, type Preferences } from "./ra-client";
 import { microphoneConstraints, processVoice, type VoiceProcessor } from "./noise-suppression";
 import { meter, prepareMeters, type SpeakingMeter } from "./speaking";
-import { displayMediaOptions, encoderFrameRate, probeEncoders, screenShareSettings, applyNativeCapture, videoCodecPreferences } from "./screen-share";
+import { displayMediaOptions, encoderFrameRate, governFrameRate, previewTrack, probeEncoders, screenShareSettings, startGovernor, applyNativeCapture, videoCodecPreferences, type Governor } from "./screen-share";
 export type Participant={uid:string;peer:string;name:string;cam:number;screen:number};
 type Medium="voice"|"cam"|"screen";
 type Wire={type:"description";value:RTCSessionDescriptionInit}|{type:"ice";value:RTCIceCandidateInit}|{type:"subscribe";medium:Medium;active:boolean}|{type:"tracks";labels:Record<string,Medium>}|{type:"speaking";active:boolean};
@@ -49,6 +49,12 @@ export class Call {
   private starting=new Set<Medium>();
   // Which codecs this browser encodes smoothly (and in hardware) at the screen profile, probed before the share is published.
   private encoders:Awaited<ReturnType<typeof probeEncoders>>=[];
+  // Lowers the share's frame rate when the encoder runs short of CPU, so the game on the same PC keeps its own.
+  governor?:Governor;
+  private governorTimer?:number;
+  private encodeTotals=new Map<string,{time:number;frames:number}>();
+  // A low-rate copy of your own screen for the self preview (see previewTrack).
+  screenPreview?:MediaStream;
   constructor(channel:string,public prefs:Preferences,private screenBitrateLimit:number,private ice:RTCIceServer[],private changed:()=>void,private error:(message:string)=>void) {
     this.channel=channel;
     window.addEventListener("keydown",this.keydown);
@@ -258,7 +264,7 @@ export class Call {
         // Always set an explicit ceiling: with none, WebRTC's default for 1080p is a few Mbps,
         // which turns a 144 FPS share into a blurry low-resolution one.
         encoding.maxBitrate=screen.bitrateCap;
-        encoding.maxFramerate=encoderFrameRate(screen,track.getSettings().frameRate,viewers);
+        encoding.maxFramerate=encoderFrameRate(screen,track.getSettings().frameRate,viewers,screen.adaptive?this.governor?.fps:undefined);
         encoding.priority="high";
         encoding.networkPriority="high";
         params.degradationPreference=screen.degradation;
@@ -365,6 +371,13 @@ export class Call {
         else if(kind==="screen")track.contentHint="music";
         track.addEventListener("ended",()=>{if(this.local.get(kind)===stream && (track.kind==="video"||kind==="voice"))void this.stop(kind);});
       }
+      if(kind==="screen" && screenTrack){
+        this.governor=screen.adaptive?startGovernor(screen.fps,this.encoders):undefined;
+        if(this.governor && this.governor.fps<screen.fps)await this.limitCapture(screenTrack,this.governor.fps);
+        if(this.governor)this.governorTimer=window.setInterval(()=>void this.govern(),2000);
+        const preview=await previewTrack(screenTrack).catch(()=>undefined);
+        this.screenPreview=preview?new MediaStream([preview]):undefined;
+      }
       this.micState();
       if(kind==="voice")this.meterVoice(stream);
       for(const link of this.links.values())this.publish(link,kind);
@@ -384,8 +397,49 @@ export class Call {
     this.local.delete(kind);
     stream?.getTracks().forEach(track=>track.stop());
     if(kind==="voice"){this.stopMeter();this.releaseVoice();}
+    if(kind==="screen")this.stopScreenExtras();
     for(const link of this.links.values())this.publish(link,kind);
     if(kind!=="voice")await this.announce();
+    this.changed();
+  }
+  private stopScreenExtras(){
+    window.clearInterval(this.governorTimer);
+    this.governorTimer=undefined;
+    this.governor=undefined;
+    this.encodeTotals.clear();
+    this.screenPreview?.getTracks().forEach(track=>track.stop());
+    this.screenPreview=undefined;
+  }
+  private async limitCapture(track:MediaStreamTrack,fps:number){
+    // Asking the capturer itself for fewer frames saves the copy and scale work too, not only the encode.
+    await track.applyConstraints({...track.getConstraints(),frameRate:{ideal:fps,max:fps}}).catch(()=>{});
+  }
+  private async govern(){
+    const track=this.local.get("screen")?.getVideoTracks()[0];
+    const state=this.governor;
+    if(!track || !state || this.closed)return;
+    let cpuLimited=false, software=false, worst:number|undefined, measured=false;
+    for(const link of this.links.values())for(const sender of link.senders.get("screen")??[]){
+      if(sender.track?.kind!=="video")continue;
+      const stats=await sender.getStats().catch(()=>undefined);
+      stats?.forEach((s:Record<string,unknown>)=>{
+        if(s.type!=="outbound-rtp")return;
+        measured=true;
+        if(s.qualityLimitationReason==="cpu")cpuLimited=true;
+        if(s.powerEfficientEncoder===false)software=true;
+        const time=Number(s.totalEncodeTime), frames=Number(s.framesEncoded), id=String(s.id);
+        const before=this.encodeTotals.get(id);
+        this.encodeTotals.set(id,{time,frames});
+        if(before && frames>before.frames)worst=Math.max(worst??0,1000*(time-before.time)/(frames-before.frames));
+      });
+    }
+    // No one is watching: nothing is encoded, so there is nothing to judge.
+    if(!measured || this.governor!==state)return;
+    const next=governFrameRate(state,{cpuLimited,software,encodeMs:worst},Date.now());
+    this.governor=next;
+    if(next.fps===state.fps)return;
+    await this.limitCapture(track,next.fps);
+    for(const link of this.links.values())this.applyEncoding(link);
     this.changed();
   }
   private announce(){return request("voice",{action:"media",channel:this.channel,peer:this.peer,cam:this.local.has("cam"),screen:this.local.has("screen")}).catch(e=>this.error(e.message));}
@@ -470,6 +524,7 @@ export class Call {
     for(const peer of [...this.hearing.keys()])this.deafen(peer);
     if(this.ears)void this.ears.close().catch(()=>{});
     this.ears=undefined;
+    this.stopScreenExtras();
     for(const stream of this.local.values())stream.getTracks().forEach(track=>track.stop());
     for(const link of this.links.values())link.pc.close();
     this.links.clear();this.local.clear();

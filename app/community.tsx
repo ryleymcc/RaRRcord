@@ -208,7 +208,7 @@ function Diagnostics({call,latency,errors}:{call:Call|null;latency:number|null;e
     <WebRtcInternals/>
     <p>Screen capture {typeof navigator.mediaDevices?.getDisplayMedia==="function"?"available":"unavailable"} · Microphone {devices.some(d=>d.kind==="audioinput")?"detected":"unavailable"} · Camera {devices.some(d=>d.kind==="videoinput")?"detected":"unavailable"}</p>
     <p>Local codecs {typeof RTCRtpSender==="undefined"?"Unavailable":codecs().join(", ")||"Unavailable"}</p>
-    <p>Screen capture {capture?.width&&capture.height?capture.width+" × "+capture.height+" · "+value(capture.frameRate," FPS"):"Unavailable"}</p>
+    <p>Screen capture {capture?.width&&capture.height?capture.width+" × "+capture.height+" · "+value(capture.frameRate," FPS"):"Unavailable"}{call?.governor&&call.governor.fps<call.governor.top?" · lowered from "+call.governor.top+" FPS to keep your PC responsive":""}</p>
     <DiagnosticCharts key={call?.peer} samples={samples}/>
     {!records.length&&<p>Join a voice room with another participant to measure a peer connection.</p>}
     {records.map(r=><div className="metric-card" key={JSON.stringify([r.peer,r.stream])}><h3>{r.name} · {r.direction}</h3><dl>{[
@@ -315,7 +315,7 @@ function UserSettings({person,prefs,limit,save,report,signOut,localAuth}:{localA
         <label>Codec preference<select value={form.codec} onChange={e=>change("codec",e.target.value)}><option value="auto">Automatic</option>{typeof RTCRtpSender!=="undefined"&&codecs().map(c=><option key={c}>{c}</option>)}</select></label>
         <label>Streaming mode<select value={form.mode} onChange={e=>change("mode",e.target.value)}><option value="motion">Gaming · motion clarity</option><option value="detail">Desktop · text clarity</option></select></label>
       </>:form.screenQuality==="maximum"?<p>Captures at your monitor’s native resolution at up to 60 FPS and keeps text sharp. Under load it drops frames rather than resolution.</p>
-      :<p>Captures at 1080p 60 FPS, prefers a hardware encoder, and keeps the frame rate steady so your game keeps its frames. Under load it lowers resolution rather than frames. Each viewer needs its own upload of about 10 Mbps. For 120 or 144 FPS, choose Custom.</p>}
+      :<p>Captures at 1080p 60 FPS, prefers a hardware encoder, and keeps the frame rate steady so your game keeps its frames. If your PC runs short, it steps down to 45 or 30 FPS on its own. Under load it lowers resolution rather than frames. Each viewer needs its own upload of about 10 Mbps. For 120 or 144 FPS, choose Custom.</p>}
       {limit>0&&<small>Community bitrate ceiling {limit.toLocaleString()} Kbps.</small>}
     </fieldset>
     <fieldset hidden={tab!=="app"}><legend>Appearance and notifications</legend><label className="inline"><input type="checkbox" checked={form.compact} onChange={e=>change("compact",e.target.checked)}/>Compact messages</label>
@@ -754,7 +754,8 @@ export default function Community({localAuth=false}:{localAuth?:boolean}={}){
   // Sort call tiles by name and stable identifiers so speaking does not move them.
   const stagePeople=call?[...call.participants].sort((a,b)=>a.name.localeCompare(b.name)||a.uid.localeCompare(b.uid)||a.peer.localeCompare(b.peer)):[];
   const ownCam=call?.local.get("cam");
-  const ownScreen=screenPreview?call?.local.get("screen"):undefined;
+  // The self preview plays a low-rate copy, so it costs your PC little while you game.
+  const ownScreen=screenPreview?call?.screenPreview??call?.local.get("screen"):undefined;
   // Volumes are saved per user, so a peer (one join of a call) is looked up to its user first.
   const uidOf=(peer:string)=>call?.participants.find(p=>p.peer===peer)?.uid??peer;
   const voiceVolume=(peer:string)=>volumes[uidOf(peer)]??1;
