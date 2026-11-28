@@ -1,0 +1,1 @@
+CREATE INDEX `message_attachment` ON `messages` (`attachment`);

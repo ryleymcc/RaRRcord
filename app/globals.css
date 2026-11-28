@@ -224,3 +224,11 @@ legend{color:var(--text);padding:0 5px}
 @media(max-width:860px){.assembly,.assembly.with-members{grid-template-columns:56px 170px minmax(0,1fr)}.members-pane{display:none}.assembly.with-members .members-pane{position:fixed;z-index:4;right:0;top:71px;width:175px;max-height:calc(100dvh - 71px);box-shadow:0 12px 40px #0008}.assembly.with-members .members-pane:focus-within,.assembly.with-members .members-pane:hover{display:block}.assembly.with-members:has([aria-label="Toggle member list"]:focus) .members-pane{display:block}}
 @media(max-width:620px){.assembly,.assembly.with-members{grid-template-columns:minmax(0,1fr)}.rail,.sidebar{display:none}.mobile-toggle{display:inline-flex}.mobile-nav .rail,.mobile-nav .sidebar{position:fixed;z-index:5;bottom:0;top:71px;display:flex}.mobile-nav .rail{left:0;width:56px}.mobile-nav .sidebar{left:56px;width:min(235px,calc(100vw - 56px))}.topbar{gap:4px;padding:0 5px}.top-actions{gap:1px}.topbar .icon-button{width:30px}.search{padding:0 3px}.search input:not([type=checkbox]){width:70px}.location-title h1{font-size:.98rem}.message-feed{padding:8px 4px}.message-menu{opacity:1}.compose-area{padding:0 5px}.stage{padding:10px}.entry-card{padding:24px}}
 @media(prefers-reduced-motion:reduce){*,*::before,*::after{scroll-behavior:auto!important}}
+.voice-members{list-style:none;margin:0 0 4px;padding:0 0 0 30px;display:grid;gap:1px}
+.voice-members li{display:flex;align-items:center;gap:8px;min-height:28px;padding:2px 6px;border-radius:6px;color:var(--muted);font-size:.86rem}
+.voice-members li span{overflow:hidden;white-space:nowrap;text-overflow:ellipsis;min-width:0}
+.voice-members li svg{flex:none;opacity:.75}
+.voice-members .avatar{width:22px;height:22px;border-radius:50%;font-size:.6rem;box-shadow:0 0 0 2px transparent;transition:box-shadow .12s}
+.voice-members li.speaking .avatar{box-shadow:0 0 0 2px var(--green)}
+.voice-members li.speaking span{color:var(--text)}
+.voice-members .live-tag{margin-left:auto;padding:1px 5px;border-radius:4px;background:#e5484d;color:#fff;font-size:.62rem;letter-spacing:.04em}

@@ -15,11 +15,12 @@ function fixture() {
         first:async()=>statement.get(...args)??null,
         all:async()=>({results:statement.all(...args)}),
         run:()=>statement.run(...args),
+        rows:()=>statement.all(...args),
       };}};
     },
     async batch(statements){
       sqlite.exec("BEGIN");
-      try {const result=await Promise.all(statements.map(s=>s.run()));sqlite.exec("COMMIT");return result;}
+      try {const result=statements.map(s=>({results:s.rows()}));sqlite.exec("COMMIT");return result;}
       catch(error){sqlite.exec("ROLLBACK");throw error;}
     },
   };
@@ -115,6 +116,9 @@ test("message changes, private uploads and voice signaling stay inside authorize
   await member("signal",{input:{channel:"gaming",peer,target:peer2,data:{type:"subscribe",medium:"screen",active:true}},expect:403});
   await member("voice",{input:{action:"join",channel:"gaming",peer}});
   await second("voice",{input:{action:"join",channel:"general-voice",peer:peer2}});
+  const rooms=(await owner("poll?rooms=1")).rooms.map(r=>r.channel+":"+r.uid).sort();
+  assert.deepEqual(rooms,["gaming:member","general-voice:second"]);
+  assert.equal((await owner("poll")).rooms,undefined);
   await member("signal",{input:{channel:"gaming",peer,target:peer2,data:{type:"subscribe",medium:"screen",active:true}},expect:404});
   await second("voice",{input:{action:"join",channel:"gaming",peer:peer2}});
   await member("signal",{input:{channel:"gaming",peer,target:peer2,data:{type:"subscribe",medium:"screen",active:true}}});
@@ -124,6 +128,7 @@ test("message changes, private uploads and voice signaling stay inside authorize
   await owner("admin",{input:{action:"disconnect",target:"member"}});
   assert.equal((await second("poll?peer="+peer2)).voice.length,1);
   assert.equal((await member("poll?peer="+peer)).voice,null);
+  assert.deepEqual((await owner("poll?rooms=1")).rooms.map(r=>r.uid),["second"]);
 });
 
 test("voice sidechat persists and shares the room's permissions and polling with voice",async()=>{
@@ -160,6 +165,10 @@ test("voice sidechat persists and shares the room's permissions and polling with
   await blocked("poll?channel="+restricted,{expect:404});
   await blocked("message",{input:{channel:restricted,text:"No access"},expect:404});
   await blocked("typing",{input:{channel:restricted},expect:404});
+  await owner("voice",{input:{action:"join",channel:restricted,peer:crypto.randomUUID()}});
+  const visible=(await blocked("poll?rooms=1")).rooms;
+  assert.deepEqual(visible.map(r=>[r.channel,r.uid,r.screen]),[[room,"member",1]]);
+  assert.equal((await owner("poll?rooms=1")).rooms.length,2);
 
   const image=Buffer.from("47494638396101000100800000ffffff000000","hex");
   const frame=Buffer.from("21f904000a0000002c0000000001000100000202440100","hex");
