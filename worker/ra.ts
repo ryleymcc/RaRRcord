@@ -9,6 +9,7 @@ type Input = Record<string, unknown>;
 
 const day = 86400000;
 const lease = 16000;
+const movedPeer = (peer:string) => "moved:"+peer;
 const sessionName = "__Host-rarr";
 const authHeaders = { "cache-control":"private, no-store", "x-content-type-options":"nosniff" };
 const unicodeEmoji = new RegExp("^(?:\\p{RGI_Emoji})$", "v");
@@ -194,6 +195,9 @@ async function route(request:Request, env:Cloudflare.Env):Promise<Response> {
       people:await all("SELECT u.id,u.name,u.username,u.role,u.avatar IS NOT NULL AS avatar,CASE WHEN u.seen<? THEN 'offline' ELSE u.status END status FROM users u WHERE u.state='approved' AND (u.id=? OR ?='admin' OR EXISTS (SELECT 1 FROM members a JOIN members b ON a.server=b.server WHERE a.uid=? AND b.uid=u.id)) ORDER BY u.name",now-25000,id,account.role,id),
       settings:await all("SELECT key,value FROM settings WHERE key IN ('bitrate','upload','stun')"),
       prefs:JSON.parse(account.prefs),
+      // Servers where this account may move people between voice rooms.
+      moderates:admin?(await all<{id:string}>("SELECT id FROM servers")).map(s=>s.id):
+        (await all<{server:string}>("SELECT server FROM members WHERE uid=? AND role='moderator'",id)).map(m=>m.server),
     });
   }
   if (path==="history" && !write) {
@@ -226,13 +230,17 @@ async function route(request:Request, env:Cloudflare.Env):Promise<Response> {
       if (!q.has("peer")) return;
       const peer=string(q.get("peer"),64);
       // Only a room this account may still enter counts as joined.
-      const room=await one<Voice>("SELECT v.* FROM voice v JOIN channels c ON c.id=v.channel AND c.kind='voice' WHERE v.uid=? AND v.peer=? AND v.expires>? AND "+channelAccess("c"),id,peer,now,...access);
+      // A moved peer (see "move") still finds its row, under the new room, until it rejoins there.
+      const room=await one<Voice>("SELECT v.* FROM voice v JOIN channels c ON c.id=v.channel AND c.kind='voice' WHERE v.uid=? AND (v.peer=? OR v.peer=?) AND v.expires>? AND "+channelAccess("c"),id,peer,movedPeer(peer),now,...access);
       result.voice=null;
       if (!room) return;
+      // A moderator may have moved this person; the client follows when this differs from its room.
+      result.room=room.channel;
+      if (room.peer!==peer) { result.voice=[]; result.moved=true; return; }
       const statements=[
         // A just-joined sender must be visible in the roster for its signal to be processed.
         sql("SELECT id,sender,data FROM signals WHERE channel=? AND recipient=? AND id>? AND expires>? ORDER BY id LIMIT 100",room.channel,peer,number(q.get("signal")),now),
-        sql("SELECT v.peer,v.uid,v.cam,v.screen,u.name FROM voice v JOIN users u ON v.uid=u.id JOIN channels c ON v.channel=c.id WHERE v.channel=? AND v.expires>? AND u.state='approved' AND "+channelAccess("c").replace("ca.uid=?","ca.uid=v.uid").replace("?='admin'","u.role='admin'").replace("ma.uid=?","ma.uid=v.uid")+" AND NOT EXISTS (SELECT 1 FROM blocks b WHERE (b.uid=? AND b.blocked=v.uid) OR (b.uid=v.uid AND b.blocked=?))",room.channel,now,id,id),
+        sql("SELECT v.peer,v.uid,v.cam,v.screen,u.name FROM voice v JOIN users u ON v.uid=u.id JOIN channels c ON v.channel=c.id WHERE v.channel=? AND v.expires>? AND v.peer NOT LIKE 'moved:%' AND u.state='approved' AND "+channelAccess("c").replace("ca.uid=?","ca.uid=v.uid").replace("?='admin'","u.role='admin'").replace("ma.uid=?","ma.uid=v.uid")+" AND NOT EXISTS (SELECT 1 FROM blocks b WHERE (b.uid=? AND b.blocked=v.uid) OR (b.uid=v.uid AND b.blocked=?))",room.channel,now,id,id),
       ];
       // The lease lasts 16 s; renewing once it is under 10 s saves a write on most polls.
       if (room.expires-now<lease-6000) statements.push(sql("UPDATE voice SET expires=? WHERE uid=? AND peer=?",now+lease,id,peer));
@@ -456,6 +464,31 @@ async function route(request:Request, env:Cloudflare.Env):Promise<Response> {
     await db.batch([sql("INSERT OR IGNORE INTO channels(id,name,kind,category) VALUES(?,?,'dm','Direct messages')",dm,label(body.name??names.join(", ").slice(0,80),80)),
       ...[id,...ids].map(uid=>sql("INSERT OR IGNORE INTO channel_members(channel,uid) VALUES(?,?)",dm,uid))]);
     return json({id:dm});
+  }
+  if (path==="move" && write) {
+    // Moving someone between voice rooms, Discord's "Move members". Administrators can move anyone;
+    // a server's moderators can move people between that server's rooms.
+    await throttle("move",30);
+    const target=string(body.target,200);
+    const to=await chan(cid(),"voice");
+    const current=await one<Voice>("SELECT * FROM voice WHERE uid=? AND expires>?",target,now);
+    if (!current) deny(404,"That person is no longer in a voice room.");
+    const from=await chan(current.channel,"voice");
+    if (from.id===to.id) return json({moved:false});
+    if (from.server!==to.server) deny(400,"Move people between rooms of the same server.");
+    if (!await moderate(from)) deny(403,"Moving members requires administrator or moderator access.");
+    const person=await one<User>("SELECT * FROM users WHERE id=? AND state='approved'",target);
+    if (!person) deny(404,"Account unavailable.");
+    // The person must be allowed into the destination themselves.
+    if (!await one("SELECT 1 FROM channels c WHERE c.id=? AND "+channelAccess("c"),to.id,person.id,person.role,person.id)) deny(403,"That person cannot join "+to.name+".");
+    // The row moves at once, so the sidebar shows it, but its peer is parked under a "moved:" name
+    // that no call roster lists. The person's client sees the new room on its next poll and
+    // rejoins there with a fresh connection, so nobody in either room talks to the old peer.
+    const moved=await one("UPDATE voice SET channel=?,peer=CASE WHEN peer LIKE 'moved:%' THEN peer ELSE 'moved:'||peer END,cam=0,screen=0 WHERE uid=? AND channel=? AND expires>? AND (SELECT COUNT(*) FROM voice WHERE channel=? AND expires>? AND uid<>?)<6 RETURNING uid",
+      to.id,target,from.id,now,to.id,now,target);
+    if (!moved) deny(409,to.name+" already has six peers.");
+    await audit("voice move",target+" "+from.id+" -> "+to.id).run();
+    return json({moved:true});
   }
   if (path==="voice" || path==="signal") {
     const room=await chan(cid(),"voice");
