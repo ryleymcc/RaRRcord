@@ -1,3 +1,4 @@
+import { localIdentity } from "./local-auth.ts";
 // Works out who is making a request, before the app or the API sees it.
 //
 // RARRCORD_AUTH picks the sign-in provider:
@@ -26,13 +27,15 @@ type Keys = { keys: Map<string, CryptoKey>; fetched: number };
 const keyCache = new Map<string, Keys>();
 const keyLifetime = 3600_000;
 
-export function authMode(env: Cloudflare.Env): "access" | "sites" | null {
+export function authMode(env: Cloudflare.Env): "access" | "sites" | "local" | null {
+  if (env.RARRCORD_AUTH === "local") return "local";
   if (env.RARRCORD_AUTH === "access" && env.CF_ACCESS_TEAM_DOMAIN && env.CF_ACCESS_AUD) return "access";
   if (env.RARRCORD_AUTH === "sites") return "sites";
   return null;
 }
 
 export function signOutPath(env: Cloudflare.Env) {
+  if (authMode(env) === "local") return "/";
   return authMode(env) === "access" ? "/cdn-cgi/access/logout" : "/signout-with-chatgpt?return_to=%2F";
 }
 
@@ -99,6 +102,7 @@ function cookieValue(request: Request, name: string) {
 
 export async function identify(request: Request, env: Cloudflare.Env, fetcher: typeof fetch = fetch): Promise<Identity | null> {
   const mode = authMode(env);
+  if (mode === "local") return localIdentity(request, env);
   if (mode === "sites") {
     const id = request.headers.get(SITES_ID), email = request.headers.get(SITES_EMAIL);
     if (!id || !email) return null;
@@ -129,7 +133,8 @@ export async function identify(request: Request, env: Cloudflare.Env, fetcher: t
 export async function authenticate(request: Request, env: Cloudflare.Env, fetcher: typeof fetch = fetch) {
   const identity = await identify(request, env, fetcher);
   const headers = new Headers(request.headers);
-  for (const name of [ID_HEADER, EMAIL_HEADER, NAME_HEADER, SITES_ID, SITES_EMAIL, SITES_NAME, SITES_NAME_ENCODING]) headers.delete(name);
+  for (const name of [ID_HEADER, EMAIL_HEADER, NAME_HEADER, SITES_ID, SITES_EMAIL, SITES_NAME, SITES_NAME_ENCODING, "x-rarrcord-auth-mode"]) headers.delete(name);
+  if (authMode(env) === "local") headers.set("x-rarrcord-auth-mode", "local");
   if (identity) {
     headers.set(ID_HEADER, identity.id);
     headers.set(EMAIL_HEADER, identity.email);

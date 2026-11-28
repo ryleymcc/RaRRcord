@@ -1,0 +1,11 @@
+import { readFileSync, writeFileSync, mkdirSync, readdirSync, copyFileSync } from "node:fs";
+const path = "dist/server/wrangler.json";
+const config = JSON.parse(readFileSync(path, "utf8"));
+const db = config.d1_databases.find(b => b.binding === "DB");
+if (!db || !config.r2_buckets.some(b => b.binding === "BUCKET")) throw new Error("Missing local storage bindings");
+mkdirSync("dist/server/migrations", { recursive: true });
+for (const file of readdirSync("drizzle").filter(f => f.endsWith(".sql"))) copyFileSync(`drizzle/${file}`, `dist/server/migrations/${file}`);
+for (const file of readdirSync("deploy/vps").filter(f => f.endsWith(".sql"))) copyFileSync(`deploy/vps/${file}`, `dist/server/migrations/${file}`);
+db.migrations_dir = "migrations";
+config.vars = { ...config.vars, RARRCORD_AUTH: "local", RARRCORD_PUBLIC_ORIGIN: "https://rarrcord.api1.ca", RARRCORD_LOCAL_OWNER: "admin", RARRCORD_OWNER_EMAIL: "admin@rarrcord.invalid" };
+writeFileSync(path, JSON.stringify(config));

@@ -1,0 +1,31 @@
+services:
+  rarrcord:
+    build:
+      context: .
+      dockerfile: Dockerfile.rarrcord
+    image: rarrcord:vps-local-auth
+    container_name: rarrcord
+    restart: unless-stopped
+    init: true
+    mem_limit: 1g
+    cpus: 2
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    volumes:
+      - rarrcord-data:/data
+      - ./.dev.vars.vps:/app/dist/server/.dev.vars:ro
+    networks:
+      - proxy-net
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:3000/api/ra/session').then(r=>{if(r.status!==401)process.exit(1)}).catch(()=>process.exit(1))"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 90s
+volumes:
+  rarrcord-data:
+networks:
+  proxy-net:
+    external: true
