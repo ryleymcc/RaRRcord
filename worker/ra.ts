@@ -1,3 +1,5 @@
+import { allow, dailyUploadBytes, readLimits } from "./limits.ts";
+
 type Value = string | number | null;
 type User = { id:string; username:string; name:string; state:string; role:string; status:string; seen:number; avatar:string|null; epoch:number; prefs:string };
 type Channel = { id:string; kind:string; server:string|null; name:string; permission:string; category:string; description:string; position:number };
@@ -65,6 +67,10 @@ async function route(request:Request, env:Cloudflare.Env):Promise<Response> {
   const id=request.headers.get("oai-authenticated-user-id");
   const email=request.headers.get("oai-authenticated-user-email");
   if (!id || !email) deny(401,"Continue with ChatGPT to sign in.");
+  if (!write) {
+    const bucket=path==="history" && q.get("search")?.trim() ? "search" : path;
+    if (!allow(id+":"+bucket,readLimits[bucket]??60,now)) deny(429,"Please slow down.");
+  }
   const db=env.DB;
   if (!db) deny(503,"Database binding unavailable.");
   const sql=(query:string,...values:Value[])=>db.prepare(query).bind(...values);
@@ -296,8 +302,13 @@ async function route(request:Request, env:Cloudflare.Env):Promise<Response> {
     if (!env.BUCKET) deny(503,"File storage unavailable.");
     const config=await one<{value:string}>("SELECT value FROM settings WHERE key='upload'");
     const limit=path==="avatar"?2097152:Math.min(Number(config?.value??8000000),20000000);
-    const length=Number(request.headers.get("content-length")??0);
+    // Without a length the whole body would be buffered before the size check below.
+    const length=Number(request.headers.get("content-length"));
+    if (!request.headers.has("content-length") || !Number.isSafeInteger(length)) deny(411,"Upload length required.");
     if (length>limit+30000) deny(413,"File too large.");
+    const today=Math.floor(now/day);
+    const used=await one<{hits:number}>("SELECT hits FROM rate WHERE uid=? AND bucket='bytes' AND minute=?",id,today);
+    if ((used?.hits??0)+length>dailyUploadBytes) deny(413,"Daily upload limit reached. Try again tomorrow.");
     const data=await request.formData();
     const file=data.get("file");
     if (!file || typeof file==="string" || !file.size || file.size>limit) deny(413,"File missing or too large.");
@@ -317,13 +328,16 @@ async function route(request:Request, env:Cloudflare.Env):Promise<Response> {
     if (media==="image/gif" && !/\.gif$/i.test(filename)) filename=filename.slice(0,176)+".gif";
     const key=token();
     await env.BUCKET.put(key,file.stream(),{httpMetadata:{contentType:media}});
+    // Counts toward today's upload allowance; "minute" holds the day number for this bucket.
+    const tally=sql("INSERT INTO rate(uid,bucket,minute,hits) VALUES(?,'bytes',?,?) ON CONFLICT(uid,bucket) DO UPDATE SET hits=CASE WHEN minute=excluded.minute THEN hits+excluded.hits ELSE excluded.hits END, minute=excluded.minute",id,today,file.size);
     try {
       if (c) await db.batch([
         sql("INSERT INTO messages(channel,uid,body,attachment,filename,reply,created) VALUES(?,?,?,?,?,?,?)",c.id,id,caption,key,filename,reply,now),
         sql("INSERT INTO events(channel,mid,time) VALUES(?,last_insert_rowid(),?)",c.id,now),
         sql("DELETE FROM typing WHERE channel=? AND uid=?",c.id,id),
+        tally,
       ]);
-      else await run("UPDATE users SET avatar=? WHERE id=?",key,id);
+      else await db.batch([sql("UPDATE users SET avatar=? WHERE id=?",key,id),tally]);
     } catch(error) {
       await env.BUCKET.delete(key);
       throw error;
