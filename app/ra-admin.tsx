@@ -1,10 +1,10 @@
 "use client";
 import {useEffect,useRef,useState,type FormEvent} from "react";
 import {ArrowDown,ArrowUp} from "lucide-react";
-import {request,serverPictureUrl,serverBackground,type Channel,type Person,type Server} from "./ra-client";
+import {request,appLogoUrl,serverPictureUrl,serverBackground,type Channel,type Person,type Server} from "./ra-client";
 import {backgroundPresets} from "../lib/backgrounds.ts";
 import {confirmAction} from "./dialog";
-type Workspace={servers:Server[];channels:Channel[];settings:{key:string;value:string}[]};
+type Workspace={servers:Server[];channels:Channel[];settings:{key:string;value:string}[];logo?:string|null};
 type State={users:(Person&{seen:number})[];channels:Channel[];logs:{id:number;name:string;action:string;detail:string;time:number}[];streams:{uid:string;name:string;room:string;cam:number;screen:number}[];roles:{server:string;name:string}[];members:{server:string;uid:string;role:string}[]};
 export default function Admin({space,server,report,refresh}:{space:Workspace;server:string;report:(text:string)=>void;refresh:()=>Promise<void>}){
   const [tab,setTab]=useState("Members");
@@ -113,6 +113,7 @@ export default function Admin({space,server,report,refresh}:{space:Workspace;ser
       {data.streams.map(s=><div key={s.uid} className="admin-row"><span>{s.name}<small>{s.room}{s.cam?" · Camera":""}{s.screen?" · Screen share":""}</small></span><button onClick={()=>void act({action:"disconnect",target:s.uid})}>Disconnect</button></div>)}
       <h3>Audit log</h3>{data.logs.map(log=><div key={log.id} className="admin-row"><div><b>{log.action}</b><small>{log.name} · {new Date(log.time).toLocaleString()}</small><small>{log.detail}</small></div></div>)}
     </div>}
+    {tab==="Settings"&&<AppLogo logo={space.logo??null} act={act} report={report} refresh={async()=>{await Promise.all([update(),refresh()]);}}/>}
     {tab==="Settings"&&<form className="settings-form" onSubmit={e=>void act({action:"settings",...form(e)})}>
       <label>Maximum upload size (bytes)<input required name="upload" type="number" min={100000} max={20000000} defaultValue={settings.upload??8000000}/></label>
       <label>Community stream bitrate ceiling (Kbps)<input name="bitrate" type="number" min={0} max={4294967} placeholder="No community cap" defaultValue={Number(settings.bitrate)||""}/></label>
@@ -162,5 +163,31 @@ function ServerBackground({server,act,report,refresh}:{server:Server;act:(input:
     </div>
     <label>Dimming: {dim}%<input type="range" min={0} max={90} step={5} value={dim} onChange={e=>setDim(Number(e.target.value))}/><small>Higher keeps text easier to read.</small></label>
     <div className="inline"><button type="button" className="primary" disabled={!changed} onClick={()=>void act({action:"server_background",target:server.id,fill,dim})}>Save background</button></div>
+  </section>;
+}
+
+// The app logo shown at the top of the server rail and as the browser tab icon. Only administrators
+// see this panel, and the API refuses uploads and removals from anyone else.
+function AppLogo({logo,act,report,refresh}:{logo:string|null;act:(input:object)=>Promise<void>;report:(text:string)=>void;refresh:()=>Promise<void>}){
+  const [uploading,setUploading]=useState(false);
+  const input=useRef<HTMLInputElement>(null);
+  async function upload(file:File){
+    if(file.size>2097152){report("Choose an image up to 2 MB.");return;}
+    const body=new FormData();body.set("file",file);
+    setUploading(true);
+    try{await request("applogo",body);report("App logo updated.");await refresh();}
+    catch(e){report((e as Error).message);}
+    finally{setUploading(false);}
+  }
+  return <section className="app-logo">
+    <h3>App logo</h3>
+    <p>Replaces the &ldquo;R&rdquo; at the top of the server list and the icon in the browser tab, for everyone.</p>
+    <div className="inline">
+      <span className="app-logo-preview" aria-hidden="true">{logo?<img src={appLogoUrl(logo)} alt=""/>:"R"}</span>
+      <input ref={input} hidden type="file" accept="image/png,image/jpeg,image/gif,image/webp" onChange={e=>{const file=e.target.files?.[0];e.target.value="";if(file)void upload(file);}}/>
+      <button type="button" disabled={uploading} onClick={()=>input.current?.click()}>{uploading?"Uploading…":logo?"Change logo":"Upload logo"}</button>
+      {logo&&<button type="button" disabled={uploading} onClick={()=>void act({action:"app_logo_remove"})}>Use default</button>}
+      <small>PNG, JPEG, GIF or WebP, up to 2 MB. Square images work best.</small>
+    </div>
   </section>;
 }

@@ -342,6 +342,42 @@ test("only administrators set server backgrounds, fills are validated, and old i
   assert.equal(objects.size,0);
 });
 
+test("only administrators change the app logo, and every member can see it",async()=>{
+  const {visitor,objects}=fixture();
+  const owner=visitor("owner"), member=visitor("m");
+  await owner("enroll",{input:{username:"owner"}});
+  await member("enroll",{input:{username:"mmm"}});
+  await owner("admin",{input:{action:"account",target:"m",state:"approved",role:"member"}});
+  await member("enroll",{input:{}});
+  assert.equal((await member("workspace")).logo,null);
+  const png=()=>new File([new Uint8Array([137,80,78,71,13,10,26,10,0,0])],"logo.png");
+  const logo=(file=png())=>{const form=new FormData();form.set("file",file);return form;};
+  // Members can neither upload nor remove it.
+  await member("applogo",{input:logo(),expect:403});
+  await member("admin",{input:{action:"app_logo_remove"},expect:403});
+  await owner("applogo",{input:logo(new File(["not an image"],"logo.txt")),expect:415});
+  await owner("applogo",{input:logo(new File([new Uint8Array(2097153)],"big.png")),expect:413});
+  assert.equal(objects.size,0);
+  await owner("applogo",{input:logo()});
+  assert.equal(objects.size,1);
+  const version=(await member("workspace")).logo;
+  assert.equal(version.length,8);
+  await member("applogo",{contentType:"image/png"});
+  await visitor("stranger")("applogo",{expect:403});
+  // Replacing it removes the old file, and saving other settings leaves it alone.
+  await owner("applogo",{input:logo()});
+  assert.equal(objects.size,1);
+  assert.notEqual((await owner("workspace")).logo,version);
+  await owner("admin",{input:{action:"settings",upload:8000000,bitrate:0,stun:""}});
+  assert.notEqual((await owner("workspace")).logo,null);
+  await owner("admin",{input:{action:"app_logo_remove"}});
+  assert.equal(objects.size,0);
+  assert.equal((await member("workspace")).logo,null);
+  await member("applogo",{expect:404});
+  const {logs}=await owner("admin");
+  assert.ok(logs.some(l=>l.action==="app_logo"));
+});
+
 test("Cloudflare TURN credentials are fetched for calls and port 53 addresses are dropped",async()=>{
   const {visitor,env}=fixture();
   env.RARRCORD_TURN_KEY_ID="key1";env.RARRCORD_TURN_KEY_TOKEN="secret";

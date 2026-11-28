@@ -4,6 +4,8 @@ export type Channel = {id:string; server:string|null; kind:string; name:string; 
 export type Server = {id:string; name:string; icon?:string; picture?:string|null; background?:string|null; background_fill?:string; background_dim?:number};
 // The version tag changes whenever the picture does, so a new upload is not hidden by the browser cache.
 export const serverPictureUrl=(id:string,version:string)=>"/api/ra/servericon?key="+encodeURIComponent(id)+"&v="+encodeURIComponent(version);
+// The app logo replaces the "R" mark in the server rail and the browser tab icon.
+export const appLogoUrl=(version:string)=>"/api/ra/applogo?v="+encodeURIComponent(version);
 export const serverBackgroundUrl=(id:string,version:string)=>"/api/ra/serverbackground?key="+encodeURIComponent(id)+"&v="+encodeURIComponent(version);
 // The CSS background for a server's chat area, or undefined when it has none. The chat colour is laid
 // over the image or fill at the chosen strength, so messages stay readable.
