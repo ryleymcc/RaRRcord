@@ -34,7 +34,8 @@ export const reads = table("reads", { channel:text().notNull(), uid:text().notNu
 export const typing = table("typing", { channel:text().notNull(), uid:text().notNull(), expires:integer().notNull() },
   t=>[primaryKey({columns:[t.channel,t.uid]})]);
 export const voice = table("voice", { uid:text().primaryKey(), channel:text().notNull(), peer:text().notNull().unique(),
-  expires:integer().notNull(), cam:integer().notNull().default(0), screen:integer().notNull().default(0) },
+  expires:integer().notNull(), cam:integer().notNull().default(0), screen:integer().notNull().default(0),
+  joined:integer().notNull().default(0) },
   t=>[index("voice_room").on(t.channel,t.expires)]);
 export const signals = table("signals", { id:integer().primaryKey({autoIncrement:true}), channel:text().notNull(),
   sender:text().notNull(), recipient:text().notNull(), data:text().notNull(), expires:integer().notNull() },
