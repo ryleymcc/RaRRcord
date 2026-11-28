@@ -401,7 +401,7 @@ export default function Community(){
   }
   const join=(c:Channel)=>voice.join(c.id,prefs,limit);
   async function logout(){
-    try{await request("logout",{});voice.disconnect();location.assign("/signout-with-chatgpt?return_to=%2F");}
+    try{const {signOut}=await request<{signOut?:string}>("logout",{});voice.disconnect();location.assign(signOut??"/signout-with-chatgpt?return_to=%2F");}
     catch(e){report((e as Error).message);}
   }
   async function enroll(event:FormEvent<HTMLFormElement>){

@@ -2,16 +2,22 @@ import handler from "vinext/server/fetch-handler";
 import { runWithConnectorBinding } from "../lib/connector-context";
 import type { ConnectorBinding } from "../lib/connector-contract.mjs";
 import { api } from "./ra";
+import { authenticate } from "./identity";
 import { newNonce, pagePolicy, secure, withPolicy } from "./security-headers";
 
 const worker = {
   async fetch(request: Request, env: Cloudflare.Env, ctx: ExecutionContext<{ CONNECTORS?: ConnectorBinding }>) {
     // The dev server injects its own inline scripts, so the headers apply to production builds only.
-    if (import.meta.env.DEV) return render(request, env, ctx);
+    // Local development signs in through the Sites mock, which only answers loopback requests.
+    if (import.meta.env.DEV) {
+      const local = env.RARRCORD_AUTH ? env : { ...env, RARRCORD_AUTH: "sites" };
+      return render(await authenticate(request, local), local, ctx);
+    }
+    const signedIn = await authenticate(request, env);
     const url = new URL(request.url);
-    if (url.pathname.startsWith("/api/ra/")) return secure(await api(request, env));
+    if (url.pathname.startsWith("/api/ra/")) return secure(await api(signedIn, env));
     const policy = pagePolicy(newNonce(), url.host);
-    return secure(await render(withPolicy(request, policy), env, ctx), policy);
+    return secure(await render(withPolicy(signedIn, policy), env, ctx), policy);
   },
 };
 

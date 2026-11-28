@@ -2,6 +2,23 @@
 
 A clean full-stack starter running on [vinext](https://github.com/cloudflare/vinext), with optional Cloudflare D1 and Drizzle support.
 
+## Sign-in and self-hosting on Cloudflare
+
+RaRRcord trusts only the identity that `worker/identity.ts` verifies. Set `RARRCORD_AUTH`:
+
+- `access`: Cloudflare Access (for self-hosting). Also set `CF_ACCESS_TEAM_DOMAIN` (such as `myteam.cloudflareaccess.com`) and `CF_ACCESS_AUD` (the Access application's Audience tag). The Worker checks the signature on every `Cf-Access-Jwt-Assertion` token against the team's public keys, along with its audience, issuer and expiry.
+- `sites`: OpenAI Sites. Use this only while the app is hosted on Sites, because there the platform sets the identity headers.
+- Unset: nobody can sign in. Local `npm run dev` defaults to `sites` so the loopback sign-in mock keeps working.
+
+Self-hosting steps:
+
+1. In Cloudflare Zero Trust, add a self-hosted Access application for the app's custom domain, with an Allow policy that lists your members' emails.
+2. Copy the application's Audience (AUD) tag and your team domain into the Worker's variables, set `RARRCORD_AUTH=access`, and set `RARRCORD_OWNER_EMAIL` to the owner's email.
+3. Serve the Worker on that custom domain only. The build sets `workers_dev: false` and `preview_urls: false`, because those URLs would skip Access.
+4. Sign-out goes to `/cdn-cgi/access/logout`, so the Access session ends too.
+
+User ids are `cf:<Access user id>`, so accounts created on Sites don't carry over. Members sign up again and the owner approves them.
+
 ## Prerequisites
 
 - Node.js `>=22.13.0`

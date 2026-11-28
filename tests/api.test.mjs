@@ -36,7 +36,7 @@ function fixture() {
     let cookie="";
     return async (path,{input,expect=200,otherOrigin,keepCookie=true,contentType,noLength}={})=>{
       const headers=new Headers();
-      if(id){headers.set("oai-authenticated-user-id",id);headers.set("oai-authenticated-user-email",email);}
+      if(id){headers.set("x-rarrcord-user-id",id);headers.set("x-rarrcord-user-email",email);}
       if(cookie&&keepCookie)headers.set("cookie",cookie);
       if(input!==undefined){
         headers.set("origin",otherOrigin??origin);

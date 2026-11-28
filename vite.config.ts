@@ -18,6 +18,9 @@ const managedLinux = readExecutionProfile() === "managed-linux";
 const localBindingConfig = {
   main: "./worker/index.ts",
   compatibility_flags: ["nodejs_compat"],
+  // workers.dev and preview URLs would skip Cloudflare Access; only the custom domain serves the app.
+  workers_dev: false,
+  preview_urls: false,
   d1_databases: d1
     ? [
         {
