@@ -320,3 +320,61 @@ test("administrators and moderators can move people between voice rooms, and the
   const logs=(await owner("admin")).logs.filter(l=>l.action==="voice move").map(l=>l.uid+": "+l.detail);
   assert.deepEqual(logs,["mod: member afk -> general-voice","owner: member gaming -> afk"]);
 });
+
+test("voice rooms list people in the order they joined, and the member list alphabetically",async()=>{
+  const {visitor}=fixture();
+  const realNow=Date.now;
+  let clock=realNow();
+  Date.now=()=>clock;
+  try {
+    const owner=visitor("owner");
+    await owner("enroll",{input:{username:"owner",name:"owner"}});
+    const people={};
+    for(const [id,name] of [["zed","Zed"],["amy","amy"],["bob","Bob"]]){
+      people[id]=visitor(id);
+      await people[id]("enroll",{input:{username:id,name}});
+      await owner("admin",{input:{action:"account",target:id,state:"approved",role:"member"}});
+      await people[id]("enroll",{input:{}});
+    }
+    const peers={zed:crypto.randomUUID(),amy:crypto.randomUUID(),bob:crypto.randomUUID()};
+    for(const id of ["zed","amy","bob"]){
+      clock+=1000;
+      await people[id]("voice",{input:{action:"join",channel:"gaming",peer:peers[id]}});
+    }
+    const roster=async()=>(await people.amy("poll?peer="+peers.amy)).voice.map(p=>p.uid);
+    const sidebar=async()=>(await owner("poll?rooms=1")).rooms.map(r=>r.uid);
+    assert.deepEqual(await roster(),["zed","amy","bob"]);
+    assert.deepEqual(await sidebar(),["zed","amy","bob"]);
+    // Lease renewals happen on polls in any order; they must not reshuffle anyone.
+    clock+=8000;
+    await people.bob("poll?peer="+peers.bob);
+    await people.zed("poll?peer="+peers.zed);
+    assert.deepEqual(await roster(),["zed","amy","bob"]);
+    // Reconnecting to the same room (a page reload) keeps your place.
+    peers.zed=crypto.randomUUID();
+    clock+=1000;
+    await people.zed("voice",{input:{action:"join",channel:"gaming",peer:peers.zed}});
+    assert.deepEqual(await roster(),["zed","amy","bob"]);
+    // Leaving and coming back, or arriving from another room, puts you at the end.
+    await people.zed("voice",{input:{action:"leave",channel:"gaming",peer:peers.zed}});
+    clock+=1000;
+    await people.zed("voice",{input:{action:"join",channel:"gaming",peer:peers.zed}});
+    clock+=1000;
+    await people.amy("voice",{input:{action:"join",channel:"general-voice",peer:peers.amy}});
+    clock+=1000;
+    await people.amy("voice",{input:{action:"join",channel:"gaming",peer:peers.amy}});
+    assert.deepEqual(await roster(),["bob","zed","amy"]);
+    // Someone moved by an admin also lands at the end of the new room.
+    const ownerPeer=crypto.randomUUID();
+    clock+=1000;
+    await owner("voice",{input:{action:"join",channel:"afk",peer:ownerPeer}});
+    await owner("move",{input:{target:"bob",channel:"afk"}});
+    assert.equal((await people.bob("poll?peer="+peers.bob)).moved,true);
+    clock+=1000;
+    await people.bob("voice",{input:{action:"join",channel:"afk",peer:peers.bob}});
+    assert.deepEqual((await owner("poll?peer="+ownerPeer)).voice.map(p=>p.uid),["owner","bob"]);
+    // Same join time falls back to the name, ignoring case.
+    const members=(await owner("workspace")).people.map(p=>p.id);
+    assert.deepEqual(members,["amy","bob","owner","zed"]);
+  } finally {Date.now=realNow;}
+});

@@ -1,0 +1,1 @@
+ALTER TABLE `voice` ADD `joined` integer DEFAULT 0 NOT NULL;
