@@ -1,5 +1,5 @@
 "use client";
-import { Fragment,memo,useCallback,useEffect,useLayoutEffect,useRef,useState, type ClipboardEvent, type FormEvent, type ReactNode } from "react";
+import { Fragment,memo,useCallback,useEffect,useLayoutEffect,useRef,useState, type ClipboardEvent, type FormEvent, type HTMLAttributes, type ReactNode } from "react";
 import { AudioLines, Expand, HeadphoneOff, LayoutGrid, Maximize2, MonitorOff, PhoneOff, VideoOff, Volume2, VolumeX, Eye, EyeOff, ChevronDown, CircleHelp, Copy, CornerUpLeft, Ellipsis, Flag, Headphones, Hash, LockKeyhole, LogOut, Menu, MessageSquare, Mic, MicOff, MonitorUp, Paperclip, ArrowDown, Download, FileText, Pencil, Pin, Plus, Reply, Search, Send, Settings, Shield, Smile, SmilePlus, Trash2, Users, Video, X } from "lucide-react";
 import { ConfirmHost, Modal, confirmAction } from "./dialog";
 import { friendlyError } from "./friendly-error";
@@ -16,11 +16,11 @@ import { DiagnosticCharts, WebRtcInternals } from "./diagnostic-charts";
 import { diagnosticSample, type DiagnosticSample } from "./diagnostic-data";
 import EmojiPicker from "./emoji-picker";
 
-type Workspace={servers:Server[]; channels:Channel[]; people:Person[]; settings:{key:string;value:string}[];prefs:Partial<Preferences>};
+type Workspace={servers:Server[]; channels:Channel[]; people:Person[]; settings:{key:string;value:string}[];prefs:Partial<Preferences>;moderates?:string[]};
 type Auth={user:Person|null;active:boolean;ownerConfigured?:boolean};
 type History={messages:Message[];cursor:number};
 type RoomMember={channel:string;uid:string;name:string;has_avatar:boolean;cam:number;screen:number};
-type Update={messages?:Message[];cursor?:number;typing?:{name:string}[];voice?:Participant[]|null;signals?:Signal[];rooms?:RoomMember[]};
+type Update={messages?:Message[];cursor?:number;typing?:{name:string}[];voice?:Participant[]|null;signals?:Signal[];rooms?:RoomMember[];room?:string;moved?:boolean};
 const day=(v:number)=>new Date(v).toLocaleDateString(undefined,{weekday:"long",month:"long",day:"numeric"});
 const clock=(v:number)=>new Date(v).toLocaleTimeString(undefined,{hour:"numeric",minute:"2-digit"});
 const initials=(s:string)=>s.trim().split(/\s+/).slice(0,2).map(x=>x[0]).join("").toUpperCase();
@@ -32,9 +32,13 @@ function Avatar({name,uid,has,status}:{name:string;uid:string;has?:boolean;statu
   return <span className={"avatar hue-"+color}>{has?<img src={avatarUrl(uid)} alt=""/>:initials(name)}{status&&<i className={"presence "+status} title={statusLabel(status)}/>}</span>;
 }
 type VoiceMember={uid:string;name:string;avatar:boolean;live:boolean;cam:boolean;speaking:boolean};
-function VoiceMembers({members}:{members:VoiceMember[]}){
+// Dragging a person between voice rooms carries their user id under this type.
+const voiceMoveType="application/x-rarrcord-voice-member";
+function VoiceMembers({members,movable,dropProps}:{members:VoiceMember[];movable:boolean;dropProps?:HTMLAttributes<HTMLElement>}){
   if(!members.length)return null;
-  return <ul className="voice-members" aria-label="In this voice room">{members.map(m=><li key={m.uid} className={m.speaking?"speaking":""}>
+  return <ul className="voice-members" aria-label="In this voice room" {...dropProps}>{members.map(m=><li key={m.uid} className={(m.speaking?"speaking":"")+(movable?" movable":"")}
+    draggable={movable||undefined} title={movable?"Drag to another voice room to move "+m.name:undefined}
+    onDragStart={movable?e=>{e.dataTransfer.setData(voiceMoveType,m.uid);e.dataTransfer.setData("text/plain",m.name);e.dataTransfer.effectAllowed="move";}:undefined}>
     <Avatar name={m.name} uid={m.uid} has={m.avatar}/><span>{m.name}</span>{m.cam&&<Video size={13} aria-label="Camera on"/>}{m.live&&<b className="live-tag">LIVE</b>}
   </li>)}</ul>;
 }
@@ -84,8 +88,8 @@ const MessageRow=memo(function MessageRow({m,previous,replyTo,me,admin,menuOpen,
     </article>
   </div>;
 });
-function IconButton({label,children,onClick,active=false,disabled=false}:{label:string;children:ReactNode;onClick:()=>void;active?:boolean;disabled?:boolean}){
-  return <button type="button" className={"icon-button"+(active?" active":"")} title={label} aria-label={label} aria-pressed={active} onClick={onClick} disabled={disabled}>{children}</button>;
+function IconButton({label,children,onClick,active=false,disabled=false,danger=false}:{label:string;children:ReactNode;onClick:()=>void;active?:boolean;disabled?:boolean;danger?:boolean}){
+  return <button type="button" className={"icon-button"+(active?" active":"")+(danger?" danger":"")} title={label} aria-label={label} aria-pressed={active} onClick={onClick} disabled={disabled}>{children}</button>;
 }
 function inline(text:string) {
   return text.split(/(\*\*[^*\n]+\*\*|_[^_\n]+_|\x60[^\x60\n]+\x60|@[a-z0-9_]+)/gi).map((s,i)=>s.startsWith("**")?<strong key={i}>{s.slice(2,-2)}</strong>:s.startsWith("_")&&s.endsWith("_")?<em key={i}>{s.slice(1,-1)}</em>:s.startsWith("\x60")?<code key={i}>{s.slice(1,-1)}</code>:s.startsWith("@")?<span key={i} className="mention">{s}</span>:s);
@@ -360,6 +364,8 @@ export default function Community(){
   const [rooms,setRooms]=useState<RoomMember[]>([]);
   const roomsAt=useRef(0);
   const cueState=useRef<{call:Call|null;uids:Set<string>|null}>({call:null,uids:null});
+  const followMove=useRef<(from:Call,room:string)=>void>(()=>{});
+  const movedTo=useRef("");
   const [volumes,setVolumes]=useState<Record<string,number>>(()=>typeof window==="undefined"?{}:loadVolumes());
   const [screenPreview,setScreenPreview]=useState(()=>typeof window==="undefined"||loadScreenPreview());
   const changeVolume=(key:string,value:number)=>setVolumes(v=>setVolume(v,key,value));
@@ -482,6 +488,8 @@ export default function Community(){
         }
         if(liveCall&&voice.call===liveCall){
           if(result.voice===null){voice.ended(liveCall);report("Your voice room connection ended.");}
+          // A moderator moved you: rejoin in the new room instead of using its roster on this call.
+          else if(result.room&&(result.moved||result.room!==liveCall.channel))followMove.current(liveCall,result.room);
           else if(result.voice)await liveCall.update(result.voice,result.signals??[]);
         }
       }catch{
@@ -550,6 +558,33 @@ export default function Community(){
     else setStage(false);
   }
   const join=(c:Channel)=>voice.join(c.id,prefs,limit);
+  // Updated after each render so the poll loop always rejoins with the latest settings.
+  useEffect(()=>{followMove.current=(from,room)=>{
+    if(movedTo.current===from.peer+room)return;
+    movedTo.current=from.peer+room;
+    const name=space?.channels.find(c=>c.id===room)?.name??"another voice room";
+    setSelected(s=>s===from.channel?room:s);
+    setToast("You were moved to "+name+".");
+    // Moved away and back again before rejoining: the old call is stale, so start over in that room.
+    if(room===from.channel)voice.disconnect();
+    // If the new room cannot be joined, the old call has no room left, so it ends.
+    void voice.join(room,prefs,limit).then(()=>{if(voice.call===from)voice.ended(from);});
+  };});
+  const [dropRoom,setDropRoom]=useState("");
+  // Only people you may move can be dragged, and only onto voice rooms of the same server.
+  const canMove=(c:Channel)=>c.kind==="voice"&&!!c.server&&!!space?.moderates?.includes(c.server);
+  async function moveMember(uid:string,room:Channel){
+    try{
+      const {moved}=await request<{moved:boolean}>("move",{target:uid,channel:room.id});
+      if(moved){roomsAt.current=0;const who=space?.people.find(p=>p.id===uid)?.name??"Member";setToast(who+" moved to "+room.name+".");}
+    }catch(e){report(e instanceof Error?e.message:"Could not move that person.");}
+  }
+  const dropProps=(c:Channel):HTMLAttributes<HTMLElement>|undefined=>canMove(c)?{
+    onDragEnter:e=>{if(e.dataTransfer.types.includes(voiceMoveType)){e.preventDefault();setDropRoom(c.id);}},
+    onDragOver:e=>{if(e.dataTransfer.types.includes(voiceMoveType)){e.preventDefault();e.dataTransfer.dropEffect="move";}},
+    onDragLeave:e=>{if(!e.currentTarget.contains(e.relatedTarget as Node|null))setDropRoom(r=>r===c.id?"":r);},
+    onDrop:e=>{const uid=e.dataTransfer.getData(voiceMoveType);setDropRoom("");if(uid){e.preventDefault();void moveMember(uid,c);}},
+  }:undefined;
   async function logout(){
     try{const {signOut}=await request<{signOut?:string}>("logout",{});voice.disconnect();location.assign(signOut??"/signout-with-chatgpt?return_to=%2F");}
     catch(e){report((e as Error).message);}
@@ -686,17 +721,18 @@ export default function Community(){
   const avatars=new Map(space?.people.map(p=>[p.id,!!p.avatar])??[]);
   const membersOf=(id:string):VoiceMember[]=>{
     // Your own room comes from the live call roster, which is fresher and knows who is speaking.
+    // Both lists arrive in the order people joined the room, so nobody moves while they talk.
     if(call?.channel===id){
       const seen=new Set<string>();
       return call.participants.filter(p=>!seen.has(p.uid)&&seen.add(p.uid)).map(p=>({uid:p.uid,name:p.name,avatar:avatars.get(p.uid)??false,live:!!p.screen,cam:!!p.cam,speaking:call.speaking(p.peer)})).sort((a,b)=>a.name.localeCompare(b.name)||a.uid.localeCompare(b.uid));
     }
-    return rooms.filter(r=>r.channel===id).map(r=>({uid:r.uid,name:r.name,avatar:!!r.has_avatar,live:!!r.screen,cam:!!r.cam,speaking:false}));
+    return rooms.filter(r=>r.channel===id).map(r=>({uid:r.uid,name:r.name,avatar:!!r.has_avatar,live:!!r.screen,cam:!!r.cam,speaking:false})).sort((a,b)=>a.name.localeCompare(b.name)||a.uid.localeCompare(b.uid));
   };
   const currentServer=space?.servers.find(s=>s.id===server);
   const callTitle=space?.channels.find(c=>c.id===call?.channel)?.name;
   const feeds=call?.feeds.filter(f=>f.kind!=="voice")??[];
   const screens=feeds.filter(f=>f.kind==="screen");
-  // Tiles keep a fixed order (name, then user, then join) so profiles never move when someone talks, joins or the roster is re-polled.
+  // Sort call tiles by name and stable identifiers so speaking does not move them.
   const stagePeople=call?[...call.participants].sort((a,b)=>a.name.localeCompare(b.name)||a.uid.localeCompare(b.uid)||a.peer.localeCompare(b.peer)):[];
   const ownCam=call?.local.get("cam");
   const ownScreen=screenPreview?call?.local.get("screen"):undefined;
@@ -722,16 +758,21 @@ export default function Community(){
       <header className="community-header"><span className="community-tag">RARRCORD</span><h2>{currentServer?.name??"Community"}</h2></header>
       <div className="channel-list">
         {!space&&<div className="skeleton-list" aria-label="Loading channels">{[60,75,50,0,55,70].map((w,i)=>w?<span key={i} className="skeleton" style={{width:w+"%"}}/>:<br key={i}/>)}</div>}
-        {groups.map(group=><details key={group} open><summary><ChevronDown size={14}/>{group}</summary>{channels.filter(c=>(c.category||"Channels")===group).map(c=><Fragment key={c.id}><button className={"channel "+(selected===c.id?"selected":"")} onClick={()=>choose(c)}>
+        {groups.map(group=><details key={group} open><summary><ChevronDown size={14}/>{group}</summary>{channels.filter(c=>(c.category||"Channels")===group).map(c=><Fragment key={c.id}><button className={"channel "+(selected===c.id?"selected":"")+(dropRoom===c.id?" drop-target":"")} onClick={()=>choose(c)} {...(c.kind==="voice"?dropProps(c):undefined)}>
           {c.kind==="voice"?<AudioLines size={17}/>:c.kind==="private"?<LockKeyhole size={15}/>:<Hash size={17}/>}<span>{c.name}</span>{c.unread>0&&chatId!==c.id&&<b className="badge">{c.unread>99?"99+":c.unread}</b>}{call?.channel===c.id&&<i className="voice-dot"/>}
-        </button>{c.kind==="voice"&&<VoiceMembers members={membersOf(c.id)}/>}</Fragment>)}</details>)}
+        </button>{c.kind==="voice"&&<VoiceMembers members={membersOf(c.id)} movable={canMove(c)} dropProps={dropProps(c)}/>}</Fragment>)}</details>)}
         <button className="channel dm-button" onClick={()=>{setDmUsers([]);setModal("dm");}}><Plus size={16}/><span>New direct message</span></button>
       </div>
-      {call&&<div className="voice-status"><div><b><i className="voice-dot"/> Voice connected</b><span>{callTitle}</span></div><IconButton label="Disconnect" onClick={()=>voice.disconnect()}><LogOut size={18}/></IconButton></div>}
+      {call&&<div className="voice-status"><div><b><i className="voice-dot"/> Voice connected</b><span>{callTitle}</span></div>
+        <span className="voice-actions">
+          <IconButton label={call.local.has("screen")?"Stop sharing your screen":"Share your screen"} active={call.local.has("screen")} onClick={()=>void call.toggle("screen")}>{call.local.has("screen")?<MonitorOff size={18}/>:<MonitorUp size={18}/>}</IconButton>
+          <IconButton label="Disconnect" onClick={()=>voice.disconnect()}><LogOut size={18}/></IconButton>
+        </span></div>}
       <footer className="profile">
         {person&&<Avatar name={person.name} uid={person.id} has={person.avatar} status={person.status}/>}
         <div><b>{person?.name}</b><small>@{person?.username}</small></div>
-        {call&&<IconButton label={call.microphonePending?"Starting microphone":call.microphoneActive?"Mute microphone":call.local.has("voice")?"Unmute microphone":"Enable microphone"} active={!call.microphoneActive} disabled={call.microphonePending||call.deaf} onClick={()=>void call.toggleMicrophone()}>{call.microphoneActive?<Mic size={16}/>:<MicOff size={16}/>}</IconButton>}
+        <IconButton label={!call?"Join a voice room to use your microphone":call.microphonePending?"Starting microphone":call.microphoneActive?"Mute microphone":call.local.has("voice")?"Unmute microphone":"Enable microphone"} active={!!call&&!call.microphoneActive} danger={!!call&&!call.microphoneActive} disabled={!call||call.microphonePending||call.deaf} onClick={()=>void call?.toggleMicrophone()}>{!call||call.microphoneActive?<Mic size={16}/>:<MicOff size={16}/>}</IconButton>
+        <IconButton label={!call?"Join a voice room to deafen":call.deaf?"Undeafen":"Deafen"} active={!!call?.deaf} danger={!!call?.deaf} disabled={!call} onClick={()=>{if(call)call.setDeaf(!call.deaf);}}>{call?.deaf?<HeadphoneOff size={16}/>:<Headphones size={16}/>}</IconButton>
         <IconButton label="User settings" onClick={()=>setModal("settings")}><Settings size={18}/></IconButton>
       </footer>
     </aside>

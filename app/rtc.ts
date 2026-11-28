@@ -28,6 +28,8 @@ export class Call {
   participants:Participant[]=[];
   feeds:Feed[]=[];
   localSpeaking=false;
+  // The last other person who spoke. Focus view keeps them in the large tile until someone else talks.
+  focus:string|null=null;
   muted=false;
   deaf=false;
   context?:AudioContext;
@@ -181,6 +183,7 @@ export class Call {
           if(!talking&&ear.silent<3)continue;
         }
         if(talking!==link.speaking){link.speaking=talking;changed=true;}
+        if(talking&&this.focus!==peer){this.focus=peer;changed=true;}
       }
       if(changed)this.changed();
     },200);
