@@ -729,6 +729,7 @@ export default function Community(){
       </div>
       {call&&<div className="voice-status"><div><b><i className="voice-dot"/> Voice connected</b><span>{callTitle}</span></div>
         <span className="voice-actions">
+          <IconButton label={call.local.has("cam")?"Turn off camera":"Turn on camera"} active={call.local.has("cam")} onClick={()=>void call.toggle("cam")}>{call.local.has("cam")?<Video size={18}/>:<VideoOff size={18}/>}</IconButton>
           <IconButton label={call.local.has("screen")?"Stop sharing your screen":"Share your screen"} active={call.local.has("screen")} onClick={()=>void call.toggle("screen")}>{call.local.has("screen")?<MonitorOff size={18}/>:<MonitorUp size={18}/>}</IconButton>
           <IconButton label="Disconnect" onClick={()=>voice.disconnect()}><LogOut size={18}/></IconButton>
         </span></div>}
