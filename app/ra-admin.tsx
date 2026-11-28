@@ -1,7 +1,7 @@
 "use client";
-import {useEffect,useState,type FormEvent} from "react";
+import {useEffect,useRef,useState,type FormEvent} from "react";
 import {ArrowDown,ArrowUp} from "lucide-react";
-import {request,type Channel,type Person,type Server} from "./ra-client";
+import {request,serverPictureUrl,type Channel,type Person,type Server} from "./ra-client";
 import {confirmAction} from "./dialog";
 type Workspace={servers:Server[];channels:Channel[];settings:{key:string;value:string}[]};
 type State={users:(Person&{seen:number})[];channels:Channel[];logs:{id:number;name:string;action:string;detail:string;time:number}[];streams:{uid:string;name:string;room:string;cam:number;screen:number}[];roles:{server:string;name:string}[];members:{server:string;uid:string;role:string}[]};
@@ -14,6 +14,8 @@ export default function Admin({space,server,report,refresh}:{space:Workspace;ser
   const [channelKind,setChannelKind]=useState("text");
   const [serverEdit,setServerEdit]=useState(false);
   const [dropTarget,setDropTarget]=useState("");
+  const [uploading,setUploading]=useState(false);
+  const pictureInput=useRef<HTMLInputElement>(null);
   const sure=async(title:string,body:string,action:string,run:()=>void)=>{if((await confirmAction({title,body,action,danger:true})).ok)run();};
   const update=()=>request<State>("admin").then(setData).catch(e=>report(e.message));
   useEffect(()=>{void update();},[]);
@@ -23,6 +25,13 @@ export default function Admin({space,server,report,refresh}:{space:Workspace;ser
       if(result.invitation)setInvite(result.invitation);else report("Changes saved.");
       await Promise.all([update(),refresh()]);
     }catch(e){report((e as Error).message);}
+  }
+  async function uploadPicture(file:File){
+    const body=new FormData();body.set("file",file);body.set("server",targetServer);
+    setUploading(true);
+    try{await request("servericon",body);report("Server picture updated.");await Promise.all([update(),refresh()]);}
+    catch(e){report((e as Error).message);}
+    finally{setUploading(false);}
   }
   const active=space.servers.find(s=>s.id===targetServer);
   const channels=(data?.channels??space.channels).filter(c=>c.server===targetServer);
@@ -58,6 +67,13 @@ export default function Admin({space,server,report,refresh}:{space:Workspace;ser
         <button type="button" onClick={()=>setServerEdit(!serverEdit)}>{serverEdit?"Create new":"Edit selected"}</button>
         {serverEdit&&active&&<button type="button" className="danger" onClick={()=>void sure("Delete "+(active?.name??"server"),"This deletes the server and removes access to its channels. It can't be undone.","Delete server",()=>void act({action:"server_delete",target:targetServer}))}>Delete server</button>}
       </form>
+      {serverEdit&&active&&<div className="inline server-picture">
+        <span className="server-picture-preview" aria-hidden="true">{active.picture?<img src={serverPictureUrl(active.id,active.picture)} alt=""/>:active.icon||active.name.slice(0,1).toUpperCase()}</span>
+        <input ref={pictureInput} hidden type="file" accept="image/png,image/jpeg,image/gif,image/webp" onChange={e=>{const file=e.target.files?.[0];e.target.value="";if(file)void uploadPicture(file);}}/>
+        <button type="button" disabled={uploading} onClick={()=>pictureInput.current?.click()}>{uploading?"Uploading…":active.picture?"Change picture":"Upload picture"}</button>
+        {active.picture&&<button type="button" disabled={uploading} onClick={()=>void act({action:"server_picture_remove",target:targetServer})}>Remove picture</button>}
+        <small>PNG, JPEG, GIF or WebP, up to 2 MB. Square images look best.</small>
+      </div>}
       <h3>Channels</h3><p>Drag a channel onto another row to move it to that position.</p>
       <div>{channels.map((c,i)=><div className={"admin-row"+(dropTarget===c.id?" drop-target":"")} draggable key={c.id} onDragStart={e=>e.dataTransfer.setData("text/plain",c.id)} onDragOver={e=>{e.preventDefault();setDropTarget(c.id);}} onDragLeave={()=>setDropTarget(t=>t===c.id?"":t)} onDragEnd={()=>setDropTarget("")} onDrop={e=>{
         e.preventDefault();setDropTarget("");

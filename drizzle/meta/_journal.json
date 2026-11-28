@@ -15,6 +15,13 @@
       "when": 1795815799221,
       "tag": "0001_message_attachment",
       "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "6",
+      "when": 1795815799222,
+      "tag": "0002_server_picture",
+      "breakpoints": true
     }
   ]
 }

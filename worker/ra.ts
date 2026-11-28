@@ -101,7 +101,7 @@ async function route(request:Request, env:Cloudflare.Env):Promise<Response> {
   const validSession=async (account:User)=> !!sessionKey && !!await one(
     "SELECT token FROM sessions WHERE token=? AND uid=? AND epoch=? AND expires>?",sessionKey,id,account.epoch,now);
   const audit=(action:string, detail:string)=>sql("INSERT INTO audit(uid,action,detail,time) VALUES(?,?,?,?)",id,action,detail,now);
-  const upload = path==="upload" || path==="avatar";
+  const upload = path==="upload" || path==="avatar" || path==="servericon";
   let body:Input={};
   if (write && !upload) {
     if (!request.headers.get("content-type")?.startsWith("application/json")) deny(415,"Expected JSON.");
@@ -189,7 +189,8 @@ async function route(request:Request, env:Cloudflare.Env):Promise<Response> {
     (await messageQuery(clause,args,order,limit).all()).results;
   if (path==="workspace" && !write) {
     return json({
-      servers:await all("SELECT * FROM servers s WHERE ?='admin' OR EXISTS (SELECT 1 FROM members WHERE server=s.id AND uid=?) ORDER BY name",account.role,id),
+      // "picture" is only a short version tag for cache busting; the storage key itself stays on the server.
+      servers:await all("SELECT s.id,s.name,s.icon,substr(s.picture,1,8) AS picture FROM servers s WHERE ?='admin' OR EXISTS (SELECT 1 FROM members WHERE server=s.id AND uid=?) ORDER BY name",account.role,id),
       channels:await all("SELECT c.*, (SELECT COUNT(*) FROM messages m WHERE m.channel=c.id AND m.deleted=0 AND m.uid<>? AND m.id>COALESCE((SELECT mid FROM reads WHERE uid=? AND channel=c.id),0)) unread FROM channels c WHERE "+channelAccess("c")+" ORDER BY position,c.name",id,id,...access),
       people:await all("SELECT u.id,u.name,u.username,u.role,u.avatar IS NOT NULL AS avatar,CASE WHEN u.seen<? THEN 'offline' ELSE u.status END status FROM users u WHERE u.state='approved' AND (u.id=? OR ?='admin' OR EXISTS (SELECT 1 FROM members a JOIN members b ON a.server=b.server WHERE a.uid=? AND b.uid=u.id)) ORDER BY u.name",now-25000,id,account.role,id),
       settings:await all("SELECT key,value FROM settings WHERE key IN ('bitrate','upload','stun')"),
@@ -285,7 +286,7 @@ async function route(request:Request, env:Cloudflare.Env):Promise<Response> {
     sockets[1].close(1000,"Probe complete");
     return new Response(null,{status:101,webSocket:sockets[0]});
   }
-  if ((path==="attachment" || path==="avatar") && !write) {
+  if ((path==="attachment" || path==="avatar" || path==="servericon") && !write) {
     if (!env.BUCKET) deny(503,"File storage unavailable.");
     const key=string(q.get("key"),100);
     let storageKey=key;
@@ -295,6 +296,11 @@ async function route(request:Request, env:Cloudflare.Env):Promise<Response> {
       if (!row) deny(404,"File unavailable.");
       await chan(row.channel);
       filename=row.filename;
+    } else if (path==="servericon") {
+      // Only people who can see a server in their list (members and administrators) can load its picture.
+      const row=await one<{picture:string|null}>("SELECT s.picture FROM servers s WHERE s.id=? AND (?='admin' OR EXISTS (SELECT 1 FROM members WHERE server=s.id AND uid=?))",key,account.role,id);
+      if (!row?.picture) deny(404,"Server picture unavailable.");
+      storageKey=row.picture;
     } else {
       const row=await one<{avatar:string|null}>("SELECT avatar FROM users WHERE id=? AND state='approved'",key);
       if (!row?.avatar) deny(404,"Avatar unavailable.");
@@ -323,11 +329,12 @@ async function route(request:Request, env:Cloudflare.Env):Promise<Response> {
     });
   }
   if (!write) deny(404,"Unknown operation.");
-  if (path==="upload" || path==="avatar") {
+  if (path==="upload" || path==="avatar" || path==="servericon") {
+    if (path==="servericon" && !admin) deny(403,"Administrator access required.");
     await throttle(path,18);
     if (!env.BUCKET) deny(503,"File storage unavailable.");
     const config=await one<{value:string}>("SELECT value FROM settings WHERE key='upload'");
-    const limit=path==="avatar"?2097152:Math.min(Number(config?.value??8000000),20000000);
+    const limit=path!=="upload"?2097152:Math.min(Number(config?.value??8000000),20000000);
     // Without a length the whole body would be buffered before the size check below.
     const length=Number(request.headers.get("content-length"));
     if (!request.headers.has("content-length") || !Number.isSafeInteger(length)) deny(411,"Upload length required.");
@@ -339,6 +346,8 @@ async function route(request:Request, env:Cloudflare.Env):Promise<Response> {
     const file=data.get("file");
     if (!file || typeof file==="string" || !file.size || file.size>limit) deny(413,"File missing or too large.");
     const c=path==="upload"?await chan(string(data.get("channel"),64)):null;
+    const serverId=path==="servericon"?string(data.get("server"),64):"";
+    if (path==="servericon" && !await one("SELECT 1 FROM servers WHERE id=?",serverId)) deny(404,"Server unavailable.");
     const gif=c && data.get("gif")==="1";
     const caption=gif?string(data.get("text")??"",8000,0):"";
     const reply=gif && data.has("reply")?number(data.get("reply")):null;
@@ -349,7 +358,7 @@ async function route(request:Request, env:Cloudflare.Env):Promise<Response> {
     const media=head[0]===137 && ascii.slice(1,4)==="PNG"?"image/png":
       head[0]===255 && head[1]===216 && head[2]===255?"image/jpeg":
       /^GIF8[79]a/.test(ascii)?"image/gif":ascii.startsWith("RIFF")&&ascii.slice(8,12)==="WEBP"?"image/webp":"application/octet-stream";
-    if (!c && media==="application/octet-stream") deny(415,"Use a PNG, JPEG, GIF, or WebP avatar.");
+    if (!c && media==="application/octet-stream") deny(415,"Use a PNG, JPEG, GIF, or WebP image.");
     if (gif && media!=="image/gif") deny(415,"Choose a GIF file.");
     if (media==="image/gif" && !/\.gif$/i.test(filename)) filename=filename.slice(0,176)+".gif";
     const key=token();
@@ -363,7 +372,11 @@ async function route(request:Request, env:Cloudflare.Env):Promise<Response> {
         sql("DELETE FROM typing WHERE channel=? AND uid=?",c.id,id),
         tally,
       ]);
-      else {
+      else if (path==="servericon") {
+        const old=await one<{picture:string|null}>("SELECT picture FROM servers WHERE id=?",serverId);
+        await db.batch([sql("UPDATE servers SET picture=? WHERE id=?",key,serverId),sql("INSERT INTO audit(uid,action,detail,time) VALUES(?,?,?,?)",id,"server_picture",serverId,now),tally]);
+        if (old?.picture) await env.BUCKET.delete(old.picture);
+      } else {
         await db.batch([sql("UPDATE users SET avatar=? WHERE id=?",key,id),tally]);
         if (account.avatar) await env.BUCKET.delete(account.avatar);
       }
@@ -530,8 +543,15 @@ async function route(request:Request, env:Cloudflare.Env):Promise<Response> {
       const name=label(body.name,60);
       if (target) commands.push(sql("UPDATE servers SET name=?,icon=? WHERE id=?",name,string(body.icon??"",4,0),target));
       else commands.push(sql("INSERT INTO servers(id,name,icon) VALUES(?,?,?)",key,name,string(body.icon??"",4,0)),sql("INSERT INTO members(server,uid) VALUES(?,?)",key,id));
+    } else if (action==="server_picture_remove") {
+      const row=await one<{picture:string|null}>("SELECT picture FROM servers WHERE id=?",target);
+      if (!row) deny(404,"Server unavailable.");
+      commands.push(sql("UPDATE servers SET picture=NULL WHERE id=?",target));
+      if (row.picture) files.push(row.picture);
     } else if (action==="server_delete") {
       await purge("SELECT id FROM channels WHERE server=?",target);
+      const old=await one<{picture:string|null}>("SELECT picture FROM servers WHERE id=?",target);
+      if (old?.picture) files.push(old.picture);
       commands.push(sql("DELETE FROM channels WHERE server=?",target),sql("DELETE FROM members WHERE server=?",target),sql("DELETE FROM roles WHERE server=?",target),sql("DELETE FROM invites WHERE server=?",target),sql("DELETE FROM servers WHERE id=?",target));
     } else if (action==="channel") {
       const server=string(body.server,64), name=label(body.name,60), kind=string(body.kind,12);
