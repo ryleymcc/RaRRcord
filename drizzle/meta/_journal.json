@@ -33,7 +33,14 @@
     {
       "idx": 4,
       "version": "6",
-      "when": 1795840146322,
+      "when": 1795835425164,
+      "tag": "0004_member_timeout",
+      "breakpoints": true
+    },
+    {
+      "idx": 5,
+      "version": "6",
+      "when": 1795840869060,
       "tag": "0006_server_background",
       "breakpoints": true
     }

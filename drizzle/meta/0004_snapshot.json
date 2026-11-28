@@ -1,7 +1,7 @@
 {
   "version": "6",
   "dialect": "sqlite",
-  "id": "de2b4108-1fe0-47f4-b1fb-1bf41187e4f0",
+  "id": "874c05a4-072c-447a-9d92-07a079727850",
   "prevId": "5b47467a-e8b9-4871-910d-4a6ef8b04315",
   "tables": {
     "audit": {
@@ -299,6 +299,14 @@
           "notNull": true,
           "autoincrement": false,
           "default": "'member'"
+        },
+        "timeout": {
+          "name": "timeout",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false,
+          "default": 0
         }
       },
       "indexes": {},
@@ -608,29 +616,6 @@
           "primaryKey": false,
           "notNull": false,
           "autoincrement": false
-        },
-        "background": {
-          "name": "background",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": false,
-          "autoincrement": false
-        },
-        "background_fill": {
-          "name": "background_fill",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": true,
-          "autoincrement": false,
-          "default": "''"
-        },
-        "background_dim": {
-          "name": "background_dim",
-          "type": "integer",
-          "primaryKey": false,
-          "notNull": true,
-          "autoincrement": false,
-          "default": 60
         }
       },
       "indexes": {},

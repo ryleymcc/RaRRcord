@@ -25,7 +25,8 @@ export function setVolume(volumes:Record<string,number>,key:string,value:number)
 }
 
 // Whether you see a preview of your own screen while you share it. On unless you hid it.
-export function loadScreenPreview(){try{return localStorage.getItem(previewKey)!=="off";}catch{return true;}}
+// Off unless chosen: drawing your own share costs the sharer GPU time, and a preview inside a shared screen is captured again.
+export function loadScreenPreview(){try{return localStorage.getItem(previewKey)==="on";}catch{return false;}}
 export function saveScreenPreview(on:boolean){try{localStorage.setItem(previewKey,on?"on":"off");}catch{/* ignore */}}
 
 // Remote audio plays through a Web Audio gain node, so a person's volume is applied the same way at every level,

@@ -30,9 +30,9 @@ test("bad saved data falls back to defaults", ()=>{
   assert.deepEqual(loadVolumes(), {b:2});
 });
 
-test("own screen preview is on until hidden", ()=>{
+test("own screen preview is off until shown", ()=>{
   store.clear();
-  assert.equal(loadScreenPreview(), true);
+  assert.equal(loadScreenPreview(), false);
   saveScreenPreview(false);
   assert.equal(loadScreenPreview(), false);
   saveScreenPreview(true);

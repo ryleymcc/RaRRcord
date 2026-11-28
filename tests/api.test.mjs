@@ -465,3 +465,67 @@ test("voice rooms list people in the order they joined, and the member list alph
     assert.deepEqual(members,["amy","bob","owner","zed"]);
   } finally {Date.now=realNow;}
 });
+
+test("moderators can disconnect, kick and time out members for a chosen length, and it is audited",async()=>{
+  const {visitor}=fixture();
+  const owner=visitor("owner"), member=visitor("member"), mod=visitor("mod"), other=visitor("other");
+  await owner("enroll",{input:{username:"owner"}});
+  for(const [id,client] of [["member",member],["mod",mod],["other",other]]){
+    await client("enroll",{input:{username:id}});
+    await owner("admin",{input:{action:"account",target:id,state:"approved",role:"member"}});
+    await client("enroll",{input:{}});
+  }
+  const act=(client,input,expect=200)=>client("moderate",{input:{server:"community",...input},expect});
+  // Ordinary members cannot moderate; moderators cannot act on admins, other moderators or themselves.
+  await act(member,{action:"timeout",target:"other",duration:60000},403);
+  await owner("admin",{input:{action:"member",server:"community",target:"mod",role:"moderator"}});
+  await act(mod,{action:"kick",target:"owner"},403);
+  await act(mod,{action:"timeout",target:"mod",duration:60000},409);
+  await act(owner,{action:"timeout",target:"member",duration:30000},400);
+  await act(owner,{action:"timeout",target:"member",duration:29*86400000},400);
+
+  // Disconnect from voice.
+  const peer=crypto.randomUUID();
+  await member("voice",{input:{action:"join",channel:"gaming",peer}});
+  await act(mod,{action:"disconnect",target:"member"});
+  assert.equal((await member("poll?peer="+peer)).voice,null);
+  await act(mod,{action:"disconnect",target:"member"},404);
+
+  // A timeout of 90 minutes stops messages, reactions, edits and voice, but not reading.
+  await member("message",{input:{channel:"general",text:"Before"}});
+  const mid=(await member("history?channel=general")).messages[0].id;
+  await member("voice",{input:{action:"join",channel:"gaming",peer}});
+  await act(mod,{action:"timeout",target:"member",duration:90*60000});
+  assert.equal((await member("poll?peer="+peer)).voice,null);
+  const refused=await member("message",{input:{channel:"general",text:"During"},expect:403});
+  assert.match(refused.error,/timed out in this server for 90 minutes/);
+  await member("message",{input:{channel:"general",action:"react",id:mid,emoji:"👍"},expect:403});
+  await member("message",{input:{channel:"general",action:"edit",id:mid,text:"Edited"},expect:403});
+  await member("voice",{input:{action:"join",channel:"gaming",peer},expect:403});
+  await member("typing",{input:{channel:"general"}});
+  assert.deepEqual((await other("poll?channel=general&after=0")).typing,[]);
+  assert.equal((await member("history?channel=general")).messages.length,1);
+  const timeouts=(await other("workspace")).timeouts;
+  assert.equal(timeouts.length,1);
+  assert.equal(timeouts[0].uid,"member");
+  // Lifting it restores everything.
+  await act(owner,{action:"timeout",target:"member",duration:0});
+  await member("message",{input:{channel:"general",text:"After"}});
+  assert.deepEqual((await other("workspace")).timeouts,[]);
+
+  // Kicking removes the person from the server and its rooms.
+  await member("voice",{input:{action:"join",channel:"gaming",peer}});
+  await act(mod,{action:"kick",target:"member"});
+  await member("history?channel=general",{expect:404});
+  await member("voice",{input:{action:"join",channel:"gaming",peer},expect:404});
+  assert.deepEqual((await owner("poll?rooms=1")).rooms,[]);
+  await act(mod,{action:"kick",target:"member"},404);
+
+  const logs=(await owner("admin")).logs.filter(l=>["voice disconnect","timeout","timeout removed","kick"].includes(l.action)).map(l=>l.uid+" "+l.action+": "+l.detail).reverse();
+  assert.deepEqual(logs,[
+    "mod voice disconnect: member in community",
+    "mod timeout: member in community for 90 minutes",
+    "owner timeout removed: member in community lifted",
+    "mod kick: member in community",
+  ]);
+});
