@@ -528,7 +528,7 @@ async function route(request:Request, env:Cloudflare.Env):Promise<Response> {
     const recipient=await one("SELECT v.uid FROM voice v JOIN users u ON u.id=v.uid JOIN channels c ON c.id=v.channel WHERE v.peer=? AND v.channel=? AND v.expires>? AND v.uid<>? AND u.state='approved' AND "+channelAccess("c").replace("ca.uid=?","ca.uid=v.uid").replace("?='admin'","u.role='admin'").replace("ma.uid=?","ma.uid=v.uid")+" AND NOT EXISTS (SELECT 1 FROM blocks b WHERE (b.uid=? AND b.blocked=v.uid) OR (b.uid=v.uid AND b.blocked=?))",target,room.id,now,id,id,id);
     if (!recipient) deny(404,"Peer unavailable.");
     const data=body.data as Record<string,unknown>|null;
-    if (!data || typeof data!=="object" || !["description","ice","subscribe","tracks","speaking"].includes(String(data.type))) deny(400,"Invalid signaling event.");
+    if (!data || typeof data!=="object" || !["description","ice","candidates","subscribe","tracks","speaking"].includes(String(data.type))) deny(400,"Invalid signaling event.");
     const encoded=JSON.stringify(data);
     if (encoded.length>40000) deny(413,"Signaling event too large.");
     await db.batch([
