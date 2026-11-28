@@ -2,6 +2,7 @@
 import { Fragment,memo,useCallback,useEffect,useLayoutEffect,useRef,useState, type ClipboardEvent, type FormEvent, type ReactNode } from "react";
 import { AudioLines, Bell, Camera, ChevronDown, CircleHelp, Headphones, Hash, LockKeyhole, LogOut, Menu, MessageSquare, Mic, MicOff, MonitorUp, Paperclip, Plus, Search, Send, Settings, Shield, Smile, Users, Video, X } from "lucide-react";
 import { playVoiceCue } from "./voice-sounds";
+import { microphoneConstraints, processVoice, suppressionMode, suppressionModes, type VoiceProcessor } from "./noise-suppression";
 import { VoiceSession, codecs, type Call, type Feed, type Metrics, type Participant, type Signal } from "./rtc";
 import { request, defaults, qualities, type Channel, type Message, type Person, type Preferences, type Server } from "./ra-client";
 import Admin from "./ra-admin";
@@ -145,31 +146,45 @@ function UserSettings({person,prefs,limit,save,report}:{person:Person;prefs:Pref
   const [test,setTest]=useState("");
   const meterTimer=useRef<number|undefined>(undefined);
   const testing=useRef(false);
-  const testResource=useRef<{stream:MediaStream;context:AudioContext}|null>(null);
+  const testResource=useRef<{stream:MediaStream;context:AudioContext;processor:VoiceProcessor;playback:HTMLAudioElement}|null>(null);
   const list=()=>navigator.mediaDevices?.enumerateDevices().then(setDevices).catch(()=>{});
-  useEffect(()=>{void list(); return ()=>{testing.current=false;window.clearInterval(meterTimer.current);testResource.current?.stream.getTracks().forEach(t=>t.stop());void testResource.current?.context.close().catch(()=>{});};},[]);
+  const endTest=()=>{
+    window.clearInterval(meterTimer.current);
+    const r=testResource.current;testResource.current=null;testing.current=false;
+    if(!r)return;
+    r.playback.pause();r.playback.srcObject=null;r.processor.close();r.stream.getTracks().forEach(t=>t.stop());void r.context.close().catch(()=>{});
+  };
+  useEffect(()=>{void list(); return endTest;},[]);
   const change=<K extends keyof Preferences>(key:K,value:Preferences[K])=>setForm(f=>({...f,[key]:value}));
   const device=(label:string,key:"input"|"output"|"camera",kind:MediaDeviceKind)=><label>{label}<select value={form[key]} onChange={e=>change(key,e.target.value)}><option value="">System default</option>{devices.filter(d=>d.kind===kind&&d.deviceId).map((d,i)=><option key={d.deviceId} value={d.deviceId}>{d.label||label+" "+(i+1)}</option>)}</select></label>;
   async function testMic(){
     if(testing.current)return;
     testing.current=true;
     try{
-      const stream=await navigator.mediaDevices.getUserMedia({audio:{deviceId:form.input?{exact:form.input}:undefined,noiseSuppression:form.noise,echoCancellation:form.echo,autoGainControl:form.gain}});
+      const stream=await navigator.mediaDevices.getUserMedia(microphoneConstraints(form));
       if(!testing.current){stream.getTracks().forEach(t=>t.stop());return;}
+      // The test runs the same processing as a call and plays it back, so you hear what others hear.
+      const processor=await processVoice(stream,form);
+      if(!testing.current){processor.close();stream.getTracks().forEach(t=>t.stop());return;}
       const context=new AudioContext();
-      testResource.current={stream,context};
+      const playback=new Audio();
+      testResource.current={stream,context,processor,playback};
+      if(processor.fallback)report(processor.fallback);
+      playback.srcObject=processor.stream;
+      if(form.output && "setSinkId" in playback)void (playback as HTMLAudioElement & {setSinkId(id:string):Promise<void>}).setSinkId(form.output).catch(()=>{});
+      void playback.play().catch(()=>{});
       const analyser=context.createAnalyser();
-      context.createMediaStreamSource(stream).connect(analyser);
+      context.createMediaStreamSource(processor.stream).connect(analyser);
       const data=new Uint8Array(analyser.fftSize);
       const started=Date.now();
       meterTimer.current=window.setInterval(()=>{
         analyser.getByteTimeDomainData(data);
         const amplitude=Math.max(...data.map(n=>Math.abs(n-128)));
-        setTest("Microphone level "+Math.round(100*amplitude/128)+"%");
-        if(Date.now()-started>5000){window.clearInterval(meterTimer.current);stream.getTracks().forEach(t=>t.stop());void context.close();testResource.current=null;testing.current=false;}
+        setTest("Playing back what others hear (use headphones) · level "+Math.round(100*amplitude/128)+"%");
+        if(Date.now()-started>10000){endTest();setTest("Test finished.");}
       },150);
       void list();
-    }catch(e){testing.current=false;report((e as Error).message);}
+    }catch(e){endTest();report((e as Error).message);}
   }
   return <form className="settings-form" onSubmit={async(e)=>{
     e.preventDefault();
@@ -184,9 +199,10 @@ function UserSettings({person,prefs,limit,save,report}:{person:Person;prefs:Pref
     </fieldset>
     <fieldset><legend>Audio and camera</legend>{device("Microphone","input","audioinput")}{device("Speaker","output","audiooutput")}{device("Camera","camera","videoinput")}
       <label>Speaking sensitivity<input type="range" min={1} max={30} value={form.sensitivity} onChange={e=>change("sensitivity",+e.target.value)}/></label>
-      <div className="toggle-grid">{([["noise","Noise suppression"],["echo","Echo cancellation"],["gain","Automatic gain"],["ptt","Push to talk"]] as const).map(([k,label])=><label key={k}><input type="checkbox" checked={form[k]} onChange={e=>change(k,e.target.checked)}/>{label}</label>)}</div>
+      <label>Noise suppression<select value={suppressionMode(form)} onChange={e=>{const mode=e.target.value as NonNullable<Preferences["suppression"]>;setForm(f=>({...f,suppression:mode,noise:mode!=="off"}));}}>{suppressionModes.map(m=><option key={m.value} value={m.value}>{m.label}</option>)}</select></label>
+      <div className="toggle-grid">{([["echo","Echo cancellation"],["gain","Automatic gain"],["ptt","Push to talk"]] as const).map(([k,label])=><label key={k}><input type="checkbox" checked={form[k]} onChange={e=>change(k,e.target.checked)}/>{label}</label>)}{(suppressionMode(form)==="strong"||suppressionMode(form)==="standard")&&<label><input type="checkbox" checked={form.voiceGate!==false} onChange={e=>change("voiceGate",e.target.checked)}/>Voice gate</label>}</div>
       {form.ptt&&<label>Push-to-talk key<input value={form.key} readOnly onKeyDown={e=>{if(e.code!=="Tab"){e.preventDefault();change("key",e.code);}}}/></label>}
-      <div className="inline"><button type="button" onClick={testMic}>Test microphone</button><span>{test}</span></div>
+      <div className="inline"><button type="button" onClick={()=>{if(testing.current){endTest();setTest("");}else void testMic();}}>{test.startsWith("Playing")?"Stop test":"Test microphone"}</button><span>{test}</span></div>
     </fieldset>
     <fieldset><legend>Screen sharing</legend>
       <label>Quality profile<select value={form.screenQuality} onChange={e=>change("screenQuality",e.target.value==="custom"?"custom":"maximum")}><option value="maximum">Highest quality</option><option value="custom">Custom</option></select></label>
