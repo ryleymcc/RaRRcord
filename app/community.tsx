@@ -6,7 +6,7 @@ import { friendlyError } from "./friendly-error";
 import { useMedia } from "./use-media";
 import QuickSwitcher from "./quick-switcher";
 import { isImage, typingText, uploadWithProgress } from "./upload";
-import { playVoiceCue } from "./voice-sounds";
+import { cleanAnnouncements, joinAnnouncement, playVoiceCue, speakAnnouncement } from "./voice-sounds";
 import { canBoost, route, setGain, type Route, loadScreenPreview, loadVolumes, maxVolume, saveScreenPreview, setVolume, streamVolumeKey } from "./user-volume";
 import { microphoneConstraints, processVoice, suppressionMode, suppressionModes, type VoiceProcessor } from "./noise-suppression";
 import { VoiceSession, codecs, type Call, type Feed, type Metrics, type Participant, type Signal } from "./rtc";
@@ -282,7 +282,7 @@ function UserSettings({person,prefs,limit,save,report,signOut}:{person:Person;pr
   useEffect(()=>()=>{if(picture)URL.revokeObjectURL(picture);},[picture]);
   return <form className="settings-form settings-tabs" onInvalidCapture={()=>setTab("profile")} onSubmit={async(e)=>{
     e.preventDefault();
-    try{await request("profile",{name,status,prefs:form});save();}catch(e){report((e as Error).message);}
+    try{await request("profile",{name,status,prefs:{...form,joinAnnouncements:cleanAnnouncements(form.joinAnnouncements)}});save();}catch(e){report((e as Error).message);}
   }}>
     <nav className="tabs" role="tablist" aria-label="Settings sections">{settingsTabs.map(([id,label])=><button type="button" role="tab" key={id} aria-selected={tab===id} className={tab===id?"active":""} onClick={()=>setTab(id)}>{label}</button>)}</nav>
     <fieldset hidden={tab!=="profile"}><legend>Profile</legend><label>Display name<input required maxLength={40} value={name} onChange={e=>setName(e.target.value)}/></label>
@@ -321,6 +321,17 @@ function UserSettings({person,prefs,limit,save,report,signOut}:{person:Person;pr
     <fieldset hidden={tab!=="app"}><legend>Appearance and notifications</legend><label className="inline"><input type="checkbox" checked={form.compact} onChange={e=>change("compact",e.target.checked)}/>Compact messages</label>
       <label className="inline"><input type="checkbox" checked={form.notifications} onChange={async e=>{const want=e.target.checked;change("notifications",want&&"Notification" in window&&(await Notification.requestPermission())==="granted");}}/>Browser mention notifications</label>
       <label className="inline"><input type="checkbox" checked={form.voiceSounds!==false} onChange={e=>change("voiceSounds",e.target.checked)}/>Voice join and leave sounds</label>
+      <div className="join-announcements">
+        <h3>Join announcements</h3>
+        <small>When one of these people joins your voice room, your browser says the line out loud. Only you hear it.</small>
+        {(form.joinAnnouncements??[]).map((row,i)=><div className="inline" key={i}>
+          <input aria-label="Username" placeholder="@username" maxLength={40} value={row.user} onChange={e=>change("joinAnnouncements",(form.joinAnnouncements??[]).map((r,j)=>j===i?{...r,user:e.target.value}:r))}/>
+          <input aria-label="What to say" placeholder="Name has joined" maxLength={100} value={row.text} onChange={e=>change("joinAnnouncements",(form.joinAnnouncements??[]).map((r,j)=>j===i?{...r,text:e.target.value}:r))}/>
+          <button type="button" onClick={()=>change("joinAnnouncements",(form.joinAnnouncements??[]).filter((_,j)=>j!==i))}>Remove</button>
+        </div>)}
+        <div className="inline"><button type="button" disabled={(form.joinAnnouncements??[]).length>=20} onClick={()=>change("joinAnnouncements",[...(form.joinAnnouncements??[]),{user:"",text:""}])}>Add announcement</button>
+          {(form.joinAnnouncements??[]).some(r=>r.text.trim())&&<button type="button" onClick={()=>speakAnnouncement((form.joinAnnouncements??[]).find(r=>r.text.trim())?.text??"")}>Preview</button>}</div>
+      </div>
       <label className="inline"><input type="checkbox" checked={!!form.hideIp} onChange={e=>change("hideIp",e.target.checked)}/>Hide my IP address in calls (routes calls through the relay, which can add a little delay)</label>
     </fieldset>
     <footer className="save-bar"><span>{dirty?"You have unsaved changes.":""}</span><a href="/privacy">Privacy</a><button className="primary" disabled={!dirty}>Save changes</button></footer>
@@ -514,13 +525,21 @@ export default function Community(){
     const now=new Set(callUids.split(","));
     if(state.uids&&enabled&&!call.deaf){
       const me=person?.id;
-      const joined=[...now].some(u=>u!==me&&!state.uids!.has(u));
+      const arrived=[...now].filter(u=>u!==me&&!state.uids!.has(u));
       const left=[...state.uids].some(u=>u!==me&&!now.has(u));
-      if(joined)playVoiceCue("join",output);
+      if(arrived.length){
+        playVoiceCue("join",output);
+        // A line you set for someone is spoken when they arrive. Only you hear it.
+        for(const uid of arrived){
+          const who=spaceRef.current?.people.find(p=>p.id===uid);
+          const line=who?joinAnnouncement(prefs.joinAnnouncements,who.username):"";
+          if(line)speakAnnouncement(line);
+        }
+      }
       else if(left)playVoiceCue("leave",output);
     }
     state.uids=now;
-  },[call,callUids,person?.id,prefs.output,prefs.voiceSounds]);
+  },[call,callUids,person?.id,prefs.output,prefs.voiceSounds,prefs.joinAnnouncements]);
   useEffect(()=>{spaceRef.current=space;},[space]);
   useEffect(()=>{
     // Keep the newest message in view when content grows after render, such as images and fonts loading.
