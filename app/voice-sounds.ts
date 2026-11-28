@@ -35,6 +35,32 @@ function note(ctx: AudioContext, destination: AudioNode, frequency: number, star
   }
 }
 
+// A line you choose to hear out loud when a particular person joins your voice room.
+export type JoinAnnouncement = { user: string; text: string };
+
+// Trims each row, drops blank ones and keeps at most 20 lines of up to 100 characters.
+export function cleanAnnouncements(list: JoinAnnouncement[] | undefined): JoinAnnouncement[] {
+  return (Array.isArray(list) ? list : [])
+    .map(row => ({ user: String(row?.user ?? "").trim().replace(/^@+/, "").slice(0, 40), text: String(row?.text ?? "").trim().slice(0, 100) }))
+    .filter(row => row.user && row.text)
+    .slice(0, 20);
+}
+
+// The line for this username, ignoring case and a leading @, or "" when there isn't one.
+export function joinAnnouncement(list: JoinAnnouncement[] | undefined, username: string): string {
+  const wanted = String(username ?? "").trim().replace(/^@+/, "").toLowerCase();
+  if (!wanted) return "";
+  return cleanAnnouncements(list).find(row => row.user.toLowerCase() === wanted)?.text ?? "";
+}
+
+// Uses the browser's built-in speech, so there are no sound files. Only this device hears it.
+export function speakAnnouncement(text: string) {
+  if (typeof speechSynthesis === "undefined" || typeof SpeechSynthesisUtterance === "undefined") return;
+  const line = text.trim().slice(0, 100);
+  if (!line) return;
+  speechSynthesis.speak(new SpeechSynthesisUtterance(line));
+}
+
 export function playVoiceCue(cue: VoiceCue, output = "", volume = 0.22) {
   const ctx = audio(output);
   if (!ctx) return;

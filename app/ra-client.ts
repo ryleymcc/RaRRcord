@@ -11,6 +11,8 @@ export type Preferences = {
   suppression?:"strong"|"standard"|"browser"|"off"; voiceGate?:boolean;
   // Send call media only through the TURN relay, so other people never see this device's IP address.
   hideIp?:boolean;
+  // Lines spoken on this device when a particular person joins your voice room.
+  joinAnnouncements?:{user:string;text:string}[];
 };
 export const defaults:Preferences={input:"",output:"",camera:"",sensitivity:3,noise:true,echo:true,gain:true,ptt:false,key:"Space",screenQuality:"smooth",resolution:"1080x60",bitrate:8000,codec:"auto",mode:"motion",notifications:false,compact:false,voiceSounds:true};
 export const qualities=["480x30","720x30","720x60","1080x30","1080x60","1080x120","1080x144","1440x30","1440x60","1440x144","2160x30","2160x60"];
