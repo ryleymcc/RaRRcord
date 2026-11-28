@@ -1,10 +1,11 @@
 "use client";
 import { Fragment,memo,useCallback,useEffect,useLayoutEffect,useRef,useState, type ClipboardEvent, type FormEvent, type ReactNode } from "react";
-import { AudioLines, Camera, ChevronDown, CircleHelp, Copy, CornerUpLeft, Ellipsis, Flag, Headphones, Hash, LockKeyhole, LogOut, Menu, MessageSquare, Mic, MicOff, MonitorUp, Paperclip, Pencil, Pin, Plus, Reply, Search, Send, Settings, Shield, Smile, SmilePlus, Trash2, Users, Video, X } from "lucide-react";
+import { AudioLines, Camera, ChevronDown, CircleHelp, Copy, CornerUpLeft, Ellipsis, Flag, Headphones, Hash, LockKeyhole, LogOut, Menu, MessageSquare, Mic, MicOff, MonitorUp, Paperclip, ArrowDown, Download, FileText, Pencil, Pin, Plus, Reply, Search, Send, Settings, Shield, Smile, SmilePlus, Trash2, Users, Video, X } from "lucide-react";
 import { ConfirmHost, Modal, confirmAction } from "./dialog";
 import { friendlyError } from "./friendly-error";
 import { useMedia } from "./use-media";
 import QuickSwitcher from "./quick-switcher";
+import { isImage, typingText, uploadWithProgress } from "./upload";
 import { playVoiceCue } from "./voice-sounds";
 import { microphoneConstraints, processVoice, suppressionMode, suppressionModes, type VoiceProcessor } from "./noise-suppression";
 import { VoiceSession, codecs, type Call, type Feed, type Metrics, type Participant, type Signal } from "./rtc";
@@ -39,9 +40,9 @@ function VoiceMembers({members}:{members:VoiceMember[]}){
 type RowActions={action:(kind:string,m:Message,extra?:object)=>Promise<void>;reply:(m:Message)=>void;pick:(m:Message)=>void;edit:(m:Message)=>void;menu:(id:number|null)=>void;jump:(id:number)=>void;remove:(m:Message)=>void;report:(m:Message)=>void};
 const snippet=(text:string)=>text.replace(/\x60\x60\x60[\s\S]*?(\x60\x60\x60|$)/g,"[code]").replace(/\s+/g," ").trim().slice(0,120);
 // A row only re-renders when its message, its neighbour, its menu or the viewer changes, not on every poll.
-const MessageRow=memo(function MessageRow({m,previous,replyTo,me,admin,menuOpen,actions}:{m:Message;previous?:Message;replyTo?:Message;me?:string;admin:boolean;menuOpen:boolean;actions:RowActions}){
+const MessageRow=memo(function MessageRow({m,previous,replyTo,me,admin,menuOpen,unreadStart=false,actions}:{m:Message;previous?:Message;replyTo?:Message;me?:string;admin:boolean;menuOpen:boolean;unreadStart?:boolean;actions:RowActions}){
   const newDay=!previous||day(previous.created)!==day(m.created);
-  const joined=!m.reply&&!!previous&&!newDay&&previous.uid===m.uid&&m.created-previous.created<240000;
+  const joined=!unreadStart&&!m.reply&&!!previous&&!newDay&&previous.uid===m.uid&&m.created-previous.created<240000;
   const reacts=Object.entries(m.reactions?JSON.parse(m.reactions) as Record<string,number>:{});
   const mine=new Set<string>(m.my_reactions?JSON.parse(m.my_reactions):[]);
   const press=useRef<ReturnType<typeof setTimeout>|undefined>(undefined);
@@ -49,6 +50,7 @@ const MessageRow=memo(function MessageRow({m,previous,replyTo,me,admin,menuOpen,
   const close=()=>actions.menu(null);
   return <div className="message-row" style={{containIntrinsicSize:joined?"auto 28px":"auto 72px"}}>
     {newDay&&<div className="date-divider"><span>{day(m.created)}</span></div>}
+    {unreadStart&&<div className="unread-divider" role="separator"><span>New messages</span></div>}
     <article id={"msg-"+m.id} className={"message "+(joined?"joined":"")+(menuOpen?" menu-open":"")} aria-label={"Message by "+m.name}
       onContextMenu={event=>{if((event.target as HTMLElement).closest("a,img,pre,code"))return;event.preventDefault();actions.menu(m.id);}}
       onPointerDown={event=>{if(event.pointerType!=="touch")return;press.current=setTimeout(()=>actions.menu(m.id),450);}}
@@ -169,7 +171,12 @@ function Diagnostics({call,latency,errors}:{call:Call|null;latency:number|null;e
     <p>A relay requires configured TURN credentials. If peers stay disconnected, try a different network or ask an administrator to check relay configuration.</p>
   </div>;
 }
-function UserSettings({person,prefs,limit,save,report}:{person:Person;prefs:Preferences;limit:number;save:()=>void;report:(x:string)=>void}){
+const settingsTabs=[["profile","Profile"],["voice","Voice and video"],["screen","Screen share"],["app","Notifications"]] as const;
+function UserSettings({person,prefs,limit,save,report,signOut}:{person:Person;prefs:Preferences;limit:number;save:()=>void;report:(x:string)=>void;signOut:()=>void}){
+  const [tab,setTab]=useState<(typeof settingsTabs)[number][0]>("profile");
+  const [picture,setPicture]=useState("");
+  const [uploading,setUploading]=useState(false);
+  const pictureInput=useRef<HTMLInputElement>(null);
   const [devices,setDevices]=useState<MediaDeviceInfo[]>([]);
   const [name,setName]=useState(person.name);
   const [status,setStatus]=useState(person.status);
@@ -217,25 +224,35 @@ function UserSettings({person,prefs,limit,save,report}:{person:Person;prefs:Pref
       void list();
     }catch(e){endTest();report((e as Error).message);}
   }
-  return <form className="settings-form" onSubmit={async(e)=>{
+  const dirty=name!==person.name||status!==person.status||JSON.stringify(form)!==JSON.stringify(prefs);
+  useEffect(()=>()=>{if(picture)URL.revokeObjectURL(picture);},[picture]);
+  return <form className="settings-form settings-tabs" onInvalidCapture={()=>setTab("profile")} onSubmit={async(e)=>{
     e.preventDefault();
     try{await request("profile",{name,status,prefs:form});save();}catch(e){report((e as Error).message);}
   }}>
-    <fieldset><legend>Profile</legend><label>Display name<input required maxLength={40} value={name} onChange={e=>setName(e.target.value)}/></label>
+    <nav className="tabs" role="tablist" aria-label="Settings sections">{settingsTabs.map(([id,label])=><button type="button" role="tab" key={id} aria-selected={tab===id} className={tab===id?"active":""} onClick={()=>setTab(id)}>{label}</button>)}</nav>
+    <fieldset hidden={tab!=="profile"}><legend>Profile</legend><label>Display name<input required maxLength={40} value={name} onChange={e=>setName(e.target.value)}/></label>
       <label>Status<select value={status} onChange={e=>setStatus(e.target.value)}>{statuses.map(([s,label])=><option value={s} key={s}>{label}</option>)}</select></label>
-      <label>Profile picture<input type="file" accept="image/png,image/jpeg,image/webp,image/gif" onChange={async(e)=>{
-        const file=e.target.files?.[0];if(!file)return;const body=new FormData();body.set("file",file);
-        try{await request("avatar",body);report("Profile picture updated.");}catch(e){report((e as Error).message);}
-      }}/></label>
+      <div className="avatar-picker"><span className="avatar-large">{picture?<img src={picture} alt=""/>:<Avatar name={name||person.name} uid={person.id} has={person.avatar}/>}</span>
+        <div><b>Profile picture</b><small>PNG, JPEG, WebP or GIF.</small></div>
+        <button type="button" disabled={uploading} onClick={()=>pictureInput.current?.click()}>{uploading?"Uploading…":"Change picture"}</button>
+        <input ref={pictureInput} hidden type="file" accept="image/png,image/jpeg,image/webp,image/gif" onChange={async(e)=>{
+          const file=e.target.files?.[0];e.target.value="";if(!file)return;const body=new FormData();body.set("file",file);
+          setUploading(true);
+          try{await request("avatar",body);setPicture(URL.createObjectURL(file));report("Profile picture updated.");}catch(e){report((e as Error).message);}
+          finally{setUploading(false);}
+        }}/>
+      </div>
+      <button type="button" className="signout" onClick={signOut}>Sign out</button>
     </fieldset>
-    <fieldset><legend>Audio and camera</legend>{device("Microphone","input","audioinput")}{device("Speaker","output","audiooutput")}{device("Camera","camera","videoinput")}
+    <fieldset hidden={tab!=="voice"}><legend>Audio and camera</legend>{device("Microphone","input","audioinput")}{device("Speaker","output","audiooutput")}{device("Camera","camera","videoinput")}
       <label>Speaking sensitivity<input type="range" min={1} max={30} value={form.sensitivity} onChange={e=>change("sensitivity",+e.target.value)}/></label>
       <label>Noise suppression<select value={suppressionMode(form)} onChange={e=>{const mode=e.target.value as NonNullable<Preferences["suppression"]>;setForm(f=>({...f,suppression:mode,noise:mode!=="off"}));}}>{suppressionModes.map(m=><option key={m.value} value={m.value}>{m.label}</option>)}</select></label>
       <div className="toggle-grid">{([["echo","Echo cancellation"],["gain","Automatic gain"],["ptt","Push to talk"]] as const).map(([k,label])=><label key={k}><input type="checkbox" checked={form[k]} onChange={e=>change(k,e.target.checked)}/>{label}</label>)}{(suppressionMode(form)==="strong"||suppressionMode(form)==="standard")&&<label><input type="checkbox" checked={form.voiceGate!==false} onChange={e=>change("voiceGate",e.target.checked)}/>Voice gate</label>}</div>
       {form.ptt&&<label>Push-to-talk key<input value={form.key} readOnly onKeyDown={e=>{if(e.code!=="Tab"){e.preventDefault();change("key",e.code);}}}/></label>}
       <div className="inline"><button type="button" onClick={()=>{if(testing.current){endTest();setTest("");}else void testMic();}}>{test.startsWith("Playing")?"Stop test":"Test microphone"}</button><span>{test}</span></div>
     </fieldset>
-    <fieldset><legend>Screen sharing</legend>
+    <fieldset hidden={tab!=="screen"}><legend>Screen sharing</legend>
       <label>Quality profile<select value={form.screenQuality} onChange={e=>change("screenQuality",e.target.value==="custom"?"custom":"maximum")}><option value="maximum">Highest quality</option><option value="custom">Custom</option></select></label>
       {form.screenQuality==="maximum"?<p>Captures at native resolution and asks for the highest available frame rate. WebRTC adapts compression and frame rate during the call.</p>:<>
         <label>Capture resolution and frame rate<select value={form.resolution} onChange={e=>change("resolution",e.target.value)}>{qualities.map(q=><option key={q} value={q}>{q.replace("2160","4K").replace("x"," · ")+" FPS"}</option>)}</select></label>
@@ -246,11 +263,11 @@ function UserSettings({person,prefs,limit,save,report}:{person:Person;prefs:Pref
       </>}
       {limit>0&&<small>Community bitrate ceiling {limit.toLocaleString()} Kbps.</small>}
     </fieldset>
-    <fieldset><legend>Appearance and notifications</legend><label className="inline"><input type="checkbox" checked={form.compact} onChange={e=>change("compact",e.target.checked)}/>Compact messages</label>
+    <fieldset hidden={tab!=="app"}><legend>Appearance and notifications</legend><label className="inline"><input type="checkbox" checked={form.compact} onChange={e=>change("compact",e.target.checked)}/>Compact messages</label>
       <label className="inline"><input type="checkbox" checked={form.notifications} onChange={async e=>{const want=e.target.checked;change("notifications",want&&"Notification" in window&&(await Notification.requestPermission())==="granted");}}/>Browser mention notifications</label>
       <label className="inline"><input type="checkbox" checked={form.voiceSounds!==false} onChange={e=>change("voiceSounds",e.target.checked)}/>Voice join and leave sounds</label>
     </fieldset>
-    <div className="inline"><button className="primary">Save settings</button><a href="/privacy">Privacy</a></div>
+    <footer className="save-bar"><span>{dirty?"You have unsaved changes.":""}</span><a href="/privacy">Privacy</a><button className="primary" disabled={!dirty}>Save changes</button></footer>
   </form>;
 }
 export default function Community(){
@@ -259,9 +276,13 @@ export default function Community(){
   const [server,setServer]=useState("community");
   const [selected,setSelected]=useState("");
   const [messages,setMessages]=useState<Message[]>([]);
-  const [typing,setTyping]=useState("");
+  const [typing,setTyping]=useState<string[]>([]);
   const [drafts,setDrafts]=useState<Record<string,string>>({});
   const [gifDraft,setGifDraft]=useState<{channel:string;file:File}|null>(null);
+  const [staged,setStaged]=useState<{channel:string;file:File;key:string}[]>([]);
+  const [progress,setProgress]=useState<{name:string;fraction:number}|null>(null);
+  const [dragging,setDragging]=useState(false);
+  const [unreadFrom,setUnreadFrom]=useState<{channel:string;id:number}|null>(null);
   const [sending,setSending]=useState(false);
   const [picker,setPicker]=useState<"emoji"|"gif"|Message|null>(null);
   const [sidechat,setSidechat]=useState("");
@@ -294,6 +315,9 @@ export default function Community(){
   const [hasMore,setHasMore]=useState(true);
   const [ready,setReady]=useState("");
   const feed=useRef<HTMLDivElement>(null);
+  const feedInner=useRef<HTMLDivElement>(null);
+  const [awayFrom,setAwayFrom]=useState<number|null>(null);
+  const spaceRef=useRef<Workspace|null>(null);
   const draftInput=useRef<HTMLTextAreaElement>(null);
   const upload=useRef<HTMLInputElement>(null);
   const gifUpload=useRef<HTMLInputElement>(null);
@@ -320,6 +344,7 @@ export default function Community(){
   const chatId=chatChannel?.id??"";
   const draft=drafts[chatId]??"";
   const gif=gifDraft?.channel===chatId?gifDraft.file:null;
+  const files=staged.filter(s=>s.channel===chatId);
   const setDraft=(text:string)=>setDrafts(previous=>({...previous,[chatId]:text}));
   const prefs={...defaults,...space?.prefs};
   const limit=Number(space?.settings.find(v=>v.key==="bitrate")?.value??0);
@@ -351,11 +376,14 @@ export default function Community(){
     return request<History>("history?"+params);
   },[]);
   useEffect(()=>{
-    setReady("");setMessages([]);setReply(null);setEdit(null);setTyping("");stick.current=true;lastTyping.current=0;
+    setReady("");setMessages([]);setReply(null);setEdit(null);setTyping([]);stick.current=true;lastTyping.current=0;
     if(!chatId)return;
     let active=true;
     const timer=setTimeout(()=>void load(chatId,find,pinned).then(data=>{
       if(!active)return;
+      // Remember where unread messages started, so the divider stays after they're marked read.
+      const unread=!find&&!pinned?spaceRef.current?.channels.find(c=>c.id===chatId)?.unread??0:0;
+      setUnreadFrom(unread>0&&unread<data.messages.length?{channel:chatId,id:data.messages[data.messages.length-unread].id}:null);
       cursor.current=data.cursor;setMessages(data.messages);setHasMore(data.messages.length===50 && !find && !pinned);setReady(chatId);
     }).catch(e=>report(e.message)),find?220:0);
     return ()=>{active=false;clearTimeout(timer);};
@@ -381,7 +409,7 @@ export default function Community(){
         if(nextRooms)setRooms(previous=>JSON.stringify(previous)===JSON.stringify(nextRooms)?previous:nextRooms);
         if(params.has("channel")){
           cursor.current=result.cursor??cursor.current;
-          setTyping(result.typing?.map(t=>t.name).join(", ")??"");
+          {const names=result.typing?.map(t=>t.name)??[];setTyping(previous=>previous.join("\n")===names.join("\n")?previous:names);}
           if(result.messages?.length){
             const changed=result.messages;
             setMessages(previous=>{
@@ -430,6 +458,16 @@ export default function Community(){
     }
     state.uids=now;
   },[call,callUids,person?.id,prefs.output,prefs.voiceSounds]);
+  useEffect(()=>{spaceRef.current=space;},[space]);
+  useEffect(()=>{
+    // Keep the newest message in view when content grows after render, such as images and fonts loading.
+    const inner=feedInner.current;
+    if(!inner||typeof ResizeObserver==="undefined")return;
+    const observer=new ResizeObserver(()=>{if(stick.current&&feed.current)feed.current.scrollTop=feed.current.scrollHeight;});
+    observer.observe(inner);
+    if(feed.current)observer.observe(feed.current);
+    return ()=>observer.disconnect();
+  },[chatId,mainStage,sidechatOpen]);
   useEffect(()=>{
     if(stick.current && feed.current)feed.current.scrollTop=feed.current.scrollHeight;
     const last=messages.at(-1);
@@ -472,10 +510,20 @@ export default function Community(){
   async function send(event:FormEvent){
     event.preventDefault();
     const text=draft.trim();
-    if((!text&&!gif)||!chatChannel||sending)return;
+    if((!text&&!gif&&!files.length)||!chatChannel||sending)return;
     setSending(true);
     try{
-      if(gif&&!edit){
+      if(files.length&&!edit){
+        // Files go first, each with a progress bar, then the text as its own message.
+        for(const item of files){
+          const data=new FormData();data.set("channel",chatId);data.set("file",item.file);
+          setProgress({name:item.file.name,fraction:0});
+          await uploadWithProgress(data,fraction=>setProgress({name:item.file.name,fraction}));
+          setStaged(list=>list.filter(s=>s.key!==item.key));
+        }
+        setProgress(null);
+        if(text)await request("message",{channel:chatId,text,action:"send",reply:reply?.id});
+      }else if(gif&&!edit){
         const data=new FormData();
         data.set("channel",chatId);data.set("file",gif);data.set("gif","1");data.set("text",text);
         if(reply)data.set("reply",String(reply.id));
@@ -487,8 +535,16 @@ export default function Community(){
         stick.current=true;setEdit(null);setReply(null);draftInput.current?.focus();
         if(find||pinned){setFind("");setPinned(false);}
       }
-    }catch(e){report((e as Error).message);}
+    }catch(e){setProgress(null);report((e as Error).message);}
     finally{setSending(false);}
+  }
+  function stageFiles(list:File[]){
+    if(edit){report("Finish editing before attaching files.");return;}
+    const gifs=list.filter(f=>f.type==="image/gif"||/\.gif$/i.test(f.name));
+    const rest=list.filter(f=>!gifs.includes(f));
+    if(gifs[0]&&!rest.length&&list.length===1){selectGif(gifs[0]);return;}
+    setStaged(previous=>[...previous,...list.map(file=>({channel:chatId,file,key:file.name+file.size+Math.random()}))].slice(-10));
+    draftInput.current?.focus();
   }
   async function action(kind:string,m:Message,extra:object={}){
     try{await request("message",{channel:chatId,action:kind,id:m.id,...extra});}
@@ -541,8 +597,11 @@ export default function Community(){
     setGifDraft({channel:chatId,file});setPicker(null);draftInput.current?.focus();
   }
   function pasteGif(event:ClipboardEvent<HTMLElement>){
-    const file=Array.from(event.clipboardData.files).find(file=>file.type==="image/gif"||/\.gif$/i.test(file.name));
-    if(file){event.preventDefault();selectGif(file);}
+    const list=Array.from(event.clipboardData.files);
+    if(!list.length)return;
+    event.preventDefault();
+    if(picker==="gif"){const file=list.find(file=>file.type==="image/gif"||/\.gif$/i.test(file.name));if(file)selectGif(file);return;}
+    stageFiles(list);
   }
   async function earlier(){
     if(!messages[0])return;
@@ -585,6 +644,7 @@ export default function Community(){
   const ownVoice=call?.local.get("cam");
   const bounded=ready===chatId?messages.slice(-350):[];
   const byId=new Map(bounded.map(m=>[m.id,m]));
+  const unseen=awayFrom===null?0:bounded.filter(m=>m.id>awayFrom&&m.uid!==person?.id).length;
   const sheetOpen=mobile||(!wide&&membersSheet);
   return <div className={"assembly "+(members?"with-members ":"")+(mobile?"mobile-nav ":"")+(prefs.compact?"compact":"")}>
     <nav className="rail" aria-label="Servers">
@@ -599,6 +659,7 @@ export default function Community(){
     <aside className="sidebar">
       <header className="community-header"><span className="community-tag">RARRCORD</span><h2>{currentServer?.name??"Community"}</h2></header>
       <div className="channel-list">
+        {!space&&<div className="skeleton-list" aria-label="Loading channels">{[60,75,50,0,55,70].map((w,i)=>w?<span key={i} className="skeleton" style={{width:w+"%"}}/>:<br key={i}/>)}</div>}
         {groups.map(group=><details key={group} open><summary><ChevronDown size={14}/>{group}</summary>{channels.filter(c=>(c.category||"Channels")===group).map(c=><Fragment key={c.id}><button className={"channel "+(selected===c.id?"selected":"")} onClick={()=>choose(c)}>
           {c.kind==="voice"?<AudioLines size={17}/>:c.kind==="private"?<LockKeyhole size={15}/>:<Hash size={17}/>}<span>{c.name}</span>{c.unread>0&&chatId!==c.id&&<b className="badge">{c.unread>99?"99+":c.unread}</b>}{call?.channel===c.id&&<i className="voice-dot"/>}
         </button>{c.kind==="voice"&&<VoiceMembers members={membersOf(c.id)}/>}</Fragment>)}</details>)}
@@ -643,14 +704,24 @@ export default function Community(){
           </div>
         </>:<div className="blank"><AudioLines size={32}/><h2>{voiceRoom?.name??"Voice room"}</h2>{voiceRoom&&<button className="primary" onClick={()=>void join(voiceRoom)}>Join voice room</button>}</div>}
       </div>}
-      {(!mainStage||sidechatOpen)&&<section className={"chat-pane"+(sidechatOpen?" voice-sidechat":"")} id={sidechatOpen?"voice-sidechat":undefined} aria-label={sidechatOpen?"Voice channel sidechat":"Channel chat"}>
+      {(!mainStage||sidechatOpen)&&<section className={"chat-pane"+(sidechatOpen?" voice-sidechat":"")} id={sidechatOpen?"voice-sidechat":undefined} aria-label={sidechatOpen?"Voice channel sidechat":"Channel chat"}
+        onDragEnter={e=>{if(chatChannel&&e.dataTransfer.types.includes("Files")){e.preventDefault();setDragging(true);}}}
+        onDragOver={e=>{if(chatChannel&&e.dataTransfer.types.includes("Files"))e.preventDefault();}}
+        onDragLeave={e=>{if(!e.currentTarget.contains(e.relatedTarget as Node))setDragging(false);}}
+        onDrop={e=>{setDragging(false);const list=Array.from(e.dataTransfer.files);if(chatChannel&&list.length){e.preventDefault();stageFiles(list);}}}>
+        {dragging&&<div className="drop-zone" aria-hidden="true"><Paperclip size={28}/><b>Drop to attach to #{chatChannel?.name}</b></div>}
         {sidechatOpen&&<header className="sidechat-header"><h2>{voiceRoom?.name} sidechat</h2><IconButton label="Close sidechat" onClick={()=>setSidechat("")}><X size={17}/></IconButton></header>}
-        <div className="message-feed" data-channel={chatId} ref={feed} onScroll={e=>{const el=e.currentTarget;stick.current=el.scrollHeight-el.scrollTop-el.clientHeight<100;}}>
+        <div className="message-feed" data-channel={chatId} ref={feed} onScroll={e=>{
+          const el=e.currentTarget;const bottom=el.scrollHeight-el.scrollTop-el.clientHeight<100;stick.current=bottom;
+          if(bottom&&awayFrom!==null)setAwayFrom(null);else if(!bottom&&awayFrom===null)setAwayFrom(bounded.at(-1)?.id??0);
+        }}><div className="feed-inner" ref={feedInner}>
           {hasMore&&bounded.length>=50&&<button className="older" onClick={earlier}>Load earlier messages</button>}
-          {!bounded.length&&<div className="blank"><span className="empty-icon">{sidechatOpen?<MessageSquare size={26}/>:<Hash size={26}/>}</span><h2>{chatId&&ready!==chatId?"Loading messages…":find?"No matching messages":pinned?"No pinned messages":chatChannel?.name??"Welcome to RaRRcord"}</h2>{(!chatId||ready===chatId)&&<p>{find?"Try another search.":pinned?"Pinned messages will appear here.":chatChannel?"Start the conversation.":"Choose a channel to get started."}</p>}</div>}
+          {!bounded.length&&chatId&&ready!==chatId&&<div className="skeleton-feed" aria-label="Loading messages">{[72,48,90,60,36].map((w,i)=><div key={i} className="skeleton-message"><span className="skeleton avatar-skel"/><div><span className="skeleton" style={{width:"18%"}}/><span className="skeleton" style={{width:w+"%"}}/></div></div>)}</div>}
+          {!bounded.length&&!(chatId&&ready!==chatId)&&<div className="blank"><span className="empty-icon">{sidechatOpen?<MessageSquare size={26}/>:<Hash size={26}/>}</span><h2>{find?"No matching messages":pinned?"No pinned messages":chatChannel?.name??"Welcome to RaRRcord"}</h2>{(!chatId||ready===chatId)&&<p>{find?"Try another search.":pinned?"Pinned messages will appear here.":chatChannel?"Start the conversation.":"Choose a channel to get started."}</p>}</div>}
           {bounded.map((m,i)=><MessageRow key={m.id} m={m} previous={bounded[i-1]} replyTo={m.reply?byId.get(m.reply):undefined}
-            me={person?.id} admin={person?.role==="admin"} menuOpen={menu===m.id} actions={rowActions}/>)}
-        </div>
+            me={person?.id} admin={person?.role==="admin"} menuOpen={menu===m.id} unreadStart={unreadFrom?.channel===chatId&&unreadFrom.id===m.id} actions={rowActions}/>)}
+        </div></div>
+        {unseen>0&&<button type="button" className="jump-present" onClick={()=>{if(feed.current){stick.current=true;feed.current.scrollTop=feed.current.scrollHeight;}setAwayFrom(null);}}>{unseen===1?"1 new message":unseen+" new messages"}<ArrowDown size={15}/></button>}
         {chatChannel&&<div className="compose-area">
           {picker==="emoji"&&<EmojiPicker label="Insert emoji" select={insertEmoji} close={()=>{setPicker(null);draftInput.current?.focus();}}/>}
           {picker&&typeof picker==="object"&&<EmojiPicker key={picker.id} label="Add reaction" close={()=>{setPicker(null);draftInput.current?.focus();}} select={emoji=>{
@@ -665,11 +736,10 @@ export default function Community(){
           </div>}
           {(edit||reply)&&<div className="compose-state">{edit?"Editing message":"Replying to "+reply?.name}<IconButton label="Cancel" onClick={()=>{if(edit)setDraft("");setReply(null);setEdit(null);}}><X size={14}/></IconButton></div>}
           {gif&&!edit&&<GifPreview file={gif} remove={()=>setGifDraft(null)}/>}
+          {files.length>0&&!edit&&<ul className="staged" aria-label="Files to send">{files.map(item=><StagedFile key={item.key} file={item.file} uploading={progress?.name===item.file.name?progress.fraction:undefined} remove={()=>setStaged(list=>list.filter(s=>s.key!==item.key))}/>)}</ul>}
           <form className="compose" onSubmit={send}>
-            <input ref={upload} hidden type="file" onChange={async e=>{
-              const f=e.currentTarget.files?.[0];e.currentTarget.value="";if(!f)return;
-              const data=new FormData();data.set("channel",chatId);data.set("file",f);
-              try{await request("upload",data);stick.current=true;}catch(e){report((e as Error).message);}
+            <input ref={upload} hidden multiple type="file" onChange={e=>{
+              const list=Array.from(e.currentTarget.files??[]);e.currentTarget.value="";if(list.length)stageFiles(list);
             }}/>
             <input ref={gifUpload} hidden type="file" accept="image/gif,.gif" onChange={event=>{
               const file=event.currentTarget.files?.[0];event.currentTarget.value="";if(file)selectGif(file);
@@ -683,15 +753,16 @@ export default function Community(){
             }}/>
             <IconButton label="Insert emoji" active={picker==="emoji"} onClick={()=>setPicker(picker==="emoji"?null:"emoji")}><Smile size={20}/></IconButton>
             <button type="button" className={"icon-button gif-button"+(picker==="gif"?" active":"")} aria-label="Add GIF" aria-expanded={picker==="gif"} disabled={!!edit} onClick={()=>setPicker(picker==="gif"?null:"gif")}>GIF</button>
-            <button className="send" aria-label="Send message" disabled={sending||(!draft.trim()&&(!gif||!!edit))}><Send size={17}/></button>
+            <button className="send" aria-label="Send message" disabled={sending||(!draft.trim()&&((!gif&&!files.length)||!!edit))}><Send size={17}/></button>
           </form>
-          <div className="typing" aria-live="polite">{typing?typing+" typing…":""}</div>
+          <div className="typing" aria-live="polite">{typing.length>0&&<><span className="typing-dots" aria-hidden="true"><i/><i/><i/></span>{typingText(typing)}…</>}</div>
         </div>}
       </section>}
       </div>
       {call?.feeds.filter(f=>f.kind==="voice").map(f=><Media key={f.key} feed={f} deaf={call.deaf} output={prefs.output} video={false} volume={volumes[f.peer]??1}/>)}
     </main>
-    {members&&<aside className="members-pane"><div className="members-title"><h2>Members</h2><span>{space?.people.length??0}</span></div>
+    {members&&<aside className="members-pane"><div className="members-title"><h2>Members</h2><span>{space?.people.length??""}</span></div>
+      {!space&&<div className="skeleton-list members-skel" aria-label="Loading members">{[55,70,45,60].map((w,i)=><div key={i}><span className="skeleton avatar-skel"/><span className="skeleton" style={{width:w+"%"}}/></div>)}</div>}
       {["online","offline"].map(group=><section key={group}><h3>{group==="online"?"Available":"Offline"}</h3>{space?.people.filter(p=>group==="offline"?p.status==="offline":p.status!=="offline").map(p=><details className="member" key={p.id}><summary><Avatar name={p.name} uid={p.id} has={p.avatar} status={p.status}/><span><b>{p.name}</b><small>@{p.username}{p.role==="admin"?" · Admin":""}</small></span></summary>
         {p.id!==person?.id&&<div className="member-menu"><button onClick={()=>{setDmUsers([p.id]);setModal("dm");}}>Message</button><button onClick={async()=>{try{await request("block",{users:[p.id]});report("Member blocked.");}catch(e){report((e as Error).message);}}}>Block</button><button onClick={()=>void request("block",{users:[p.id],remove:true}).then(()=>report("Member unblocked.")).catch(e=>report(e.message))}>Unblock</button></div>}
       </details>)}</section>)}
@@ -700,7 +771,7 @@ export default function Community(){
     <div className="toast-region" role="status" aria-live="polite">{toast&&<div className="toast">{toast}<IconButton label="Dismiss" onClick={()=>setToast("")}><X size={16}/></IconButton></div>}</div>
     <ConfirmHost/>
     {modal&&<Modal key={modal} wide={modal==="admin"} className={modal==="switch"?"switch-dialog":""} onClose={()=>setModal("")} title={({admin:"Administration",settings:"User settings",diagnostics:"Connection diagnostics",dm:"Direct message",help:"RaRRcord help",switch:"Jump to"} as Record<string,string>)[modal]}>
-      {modal==="settings"&&person&&<><UserSettings person={person} prefs={prefs} limit={limit} save={()=>{void refresh();void refreshAuth();setModal("");report(call?"Settings saved. Rejoin the call to apply media changes.":"Settings saved.");}} report={report}/><button className="signout" onClick={logout}>Sign out</button></>}
+      {modal==="settings"&&person&&<><UserSettings person={person} prefs={prefs} limit={limit} save={()=>{void refresh();void refreshAuth();setModal("");report(call?"Settings saved. Rejoin the call to apply media changes.":"Settings saved.");}} report={report} signOut={logout}/></>}
       {modal==="diagnostics"&&<Diagnostics call={call} latency={latency} errors={errors}/>}
       {modal==="admin"&&space&&<Admin space={space} server={server} report={report} refresh={refresh}/>}
       {modal==="dm"&&<form className="settings-form" onSubmit={async e=>{e.preventDefault();try{const result=await request<{id:string}>("dm",{users:dmUsers});await refresh();setSelected(result.id);setStage(false);setModal("");}catch(e){report((e as Error).message);}}}>
@@ -725,8 +796,26 @@ function GifPreview({file,remove}:{file:File;remove:()=>void}){
   },[file]);
   return <div className="gif-preview">{url&&<img src={url} alt="GIF preview"/>}<span>{file.name}</span><IconButton label="Remove GIF" onClick={remove}><X size={16}/></IconButton></div>;
 }
+function StagedFile({file,uploading,remove}:{file:File;uploading?:number;remove:()=>void}){
+  const size=file.size<1048576?Math.max(1,Math.round(file.size/1024))+" KB":(file.size/1048576).toFixed(1)+" MB";
+  return <li className="staged-file">
+    {isImage(file.name)?<img alt="" ref={img=>{if(!img)return;const preview=URL.createObjectURL(file);img.src=preview;return ()=>URL.revokeObjectURL(preview);}}/>:<span className="file-icon"><FileText size={22}/></span>}
+    <span><b>{file.name}</b><small>{uploading===undefined?size:"Uploading "+Math.round(uploading*100)+"%"}</small></span>
+    {uploading===undefined?<IconButton label={"Remove "+file.name} onClick={remove}><X size={15}/></IconButton>:null}
+    {uploading!==undefined&&<progress max={1} value={uploading} aria-label={"Uploading "+file.name}/>}
+  </li>;
+}
 function Attachment({message:m}:{message:Message}){
   const url="/api/ra/attachment?key="+encodeURIComponent(m.attachment??"");
   const [failed,setFailed]=useState(false);
-  return <div className="attachment">{!failed&&/\.(png|gif|jpe?g|webp)$/i.test(m.filename??"")&&<img loading="lazy" src={url} alt={m.filename} onError={()=>setFailed(true)}/>}<a href={url+"&download=1"}>{m.filename??"Download attachment"}</a></div>;
+  const [open,setOpen]=useState(false);
+  const image=!failed&&isImage(m.filename??"");
+  return <div className="attachment">
+    {image?<button type="button" className="attachment-image" aria-label={"Open "+m.filename} onClick={()=>setOpen(true)}><img loading="lazy" src={url} alt={m.filename} onError={()=>setFailed(true)}/></button>:
+      <a className="attachment-file" href={url+"&download=1"}><FileText size={22}/><span>{m.filename??"Attachment"}</span><Download size={16}/></a>}
+    {open&&<Modal title={m.filename??"Image"} className="lightbox" onClose={()=>setOpen(false)}>
+      <img src={url} alt={m.filename}/>
+      <a className="primary" href={url+"&download=1"}><Download size={16}/>Download</a>
+    </Modal>}
+  </div>;
 }
