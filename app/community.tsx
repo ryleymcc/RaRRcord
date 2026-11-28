@@ -724,18 +724,16 @@ export default function Community(){
     // Both lists arrive in the order people joined the room, so nobody moves while they talk.
     if(call?.channel===id){
       const seen=new Set<string>();
-      return call.participants.filter(p=>!seen.has(p.uid)&&seen.add(p.uid)).map(p=>({uid:p.uid,name:p.name,avatar:avatars.get(p.uid)??false,live:!!p.screen,cam:!!p.cam,speaking:call.speaking(p.peer)}));
+      return call.participants.filter(p=>!seen.has(p.uid)&&seen.add(p.uid)).map(p=>({uid:p.uid,name:p.name,avatar:avatars.get(p.uid)??false,live:!!p.screen,cam:!!p.cam,speaking:call.speaking(p.peer)})).sort((a,b)=>a.name.localeCompare(b.name)||a.uid.localeCompare(b.uid));
     }
-    return rooms.filter(r=>r.channel===id).map(r=>({uid:r.uid,name:r.name,avatar:!!r.has_avatar,live:!!r.screen,cam:!!r.cam,speaking:false}));
+    return rooms.filter(r=>r.channel===id).map(r=>({uid:r.uid,name:r.name,avatar:!!r.has_avatar,live:!!r.screen,cam:!!r.cam,speaking:false})).sort((a,b)=>a.name.localeCompare(b.name)||a.uid.localeCompare(b.uid));
   };
   const currentServer=space?.servers.find(s=>s.id===server);
   const callTitle=space?.channels.find(c=>c.id===call?.channel)?.name;
   const feeds=call?.feeds.filter(f=>f.kind!=="voice")??[];
   const screens=feeds.filter(f=>f.kind==="screen");
-  // Tiles stay in the order people joined. Focus view lifts only the last person who spoke into the
-  // large tile and keeps them there through pauses; everyone else keeps their place.
-  const focused=call?.participants.find(p=>p.peer===call.focus);
-  const stagePeople=call?(speaker&&focused?[focused,...call.participants.filter(p=>p!==focused)]:call.participants):[];
+  // Sort call tiles by name and stable identifiers so speaking does not move them.
+  const stagePeople=call?[...call.participants].sort((a,b)=>a.name.localeCompare(b.name)||a.uid.localeCompare(b.uid)||a.peer.localeCompare(b.peer)):[];
   const ownCam=call?.local.get("cam");
   const ownScreen=screenPreview?call?.local.get("screen"):undefined;
   // Volumes are saved per user, so a peer (one join of a call) is looked up to its user first.
