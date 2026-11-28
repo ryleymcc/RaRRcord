@@ -62,7 +62,7 @@ function fixture() {
       return body;
     };
   }
-  return {visitor,objects};
+  return {visitor,objects,env};
 }
 
 test("independent app sessions enforce approval, origin, ownership, bans and revocation",async()=>{
@@ -117,9 +117,9 @@ test("message changes, private uploads and voice signaling stay inside authorize
   assert.equal(new TextDecoder().decode(await member("attachment?key="+file)),"private notes");
   await second("attachment?key="+file,{expect:404});
   const peer=crypto.randomUUID(), peer2=crypto.randomUUID();
-  assert.deepEqual(await member("ice"),{servers:[{urls:"stun:stun.cloudflare.com:3478"}]});
+  assert.deepEqual(await member("ice"),{servers:[{urls:"stun:stun.cloudflare.com:3478"}],relay:false});
   await owner("admin",{input:{action:"settings",bitrate:8000,upload:1000000,stun:"stun:stun.example.test:3478"}});
-  assert.deepEqual(await member("ice"),{servers:[{urls:"stun:stun.example.test:3478"}]});
+  assert.deepEqual(await member("ice"),{servers:[{urls:"stun:stun.example.test:3478"}],relay:false});
   await member("signal",{input:{channel:"gaming",peer,target:peer2,data:{type:"subscribe",medium:"screen",active:true}},expect:403});
   await member("voice",{input:{action:"join",channel:"gaming",peer}});
   await second("voice",{input:{action:"join",channel:"general-voice",peer:peer2}});
@@ -253,4 +253,22 @@ test("deleting a channel or server removes its messages and files",async()=>{
   await owner("admin",{input:{action:"server_delete",target:server}});
   assert.equal(objects.size,0);
   await owner("history?channel="+channel,{expect:404});
+});
+
+test("Cloudflare TURN credentials are fetched for calls and port 53 addresses are dropped",async()=>{
+  const {visitor,env}=fixture();
+  env.RARRCORD_TURN_KEY_ID="key1";env.RARRCORD_TURN_KEY_TOKEN="secret";
+  const owner=visitor("turn-owner","owner@example.test");
+  await owner("enroll",{input:{username:"turnowner"}});
+  const real=globalThis.fetch;
+  let seen;
+  globalThis.fetch=async(url,init)=>{seen={url,auth:init.headers.authorization,body:init.body};return Response.json({iceServers:[{urls:["stun:stun.cloudflare.com:3478","stun:stun.cloudflare.com:53","turn:turn.cloudflare.com:3478?transport=udp","turn:turn.cloudflare.com:53?transport=udp","turns:turn.cloudflare.com:443?transport=tcp"],username:"u",credential:"c"}]});};
+  try {
+    const ice=await owner("ice");
+    assert.equal(seen.url,"https://rtc.live.cloudflare.com/v1/turn/keys/key1/credentials/generate-ice-servers");
+    assert.equal(seen.auth,"Bearer secret");
+    assert.equal(JSON.parse(seen.body).ttl,86400);
+    assert.equal(ice.relay,true);
+    assert.deepEqual(ice.servers[1].urls,["stun:stun.cloudflare.com:3478","turn:turn.cloudflare.com:3478?transport=udp","turns:turn.cloudflare.com:443?transport=tcp"]);
+  } finally { globalThis.fetch=real; }
 });

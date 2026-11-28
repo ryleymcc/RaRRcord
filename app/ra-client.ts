@@ -7,6 +7,8 @@ export type Preferences = {
   ptt:boolean; key:string; screenQuality:"maximum"|"custom"; resolution:string; bitrate:number; codec:string; mode:string; notifications:boolean; compact:boolean; voiceSounds:boolean;
   // Unset means "strong", or "off" when an older saved setting had noise turned off.
   suppression?:"strong"|"standard"|"browser"|"off"; voiceGate?:boolean;
+  // Send call media only through the TURN relay, so other people never see this device's IP address.
+  hideIp?:boolean;
 };
 export const defaults:Preferences={input:"",output:"",camera:"",sensitivity:3,noise:true,echo:true,gain:true,ptt:false,key:"Space",screenQuality:"maximum",resolution:"1080x60",bitrate:8000,codec:"auto",mode:"motion",notifications:false,compact:false,voiceSounds:true};
 export const qualities=["480x30","720x30","720x60","1080x30","1080x60","1440x30","1440x60","2160x30","2160x60"];

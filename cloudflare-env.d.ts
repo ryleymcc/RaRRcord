@@ -9,6 +9,9 @@ declare namespace Cloudflare {
     CF_ACCESS_TEAM_DOMAIN?: string;
     /** The Access application's Audience (AUD) tag. */
     CF_ACCESS_AUD?: string;
+    /** Cloudflare TURN key id and API token (Realtime > TURN in the dashboard). */
+    RARRCORD_TURN_KEY_ID?: string;
+    RARRCORD_TURN_KEY_TOKEN?: string;
     RARRCORD_TURN_BROKER?: string;
     RARRCORD_TURN_TOKEN?: string;
   }
