@@ -1,9 +1,10 @@
 // RaRRcord voice gate. Runs after the denoiser and passes audio only while someone is talking.
 //
 // Keyboard clicks and other short transients that survive denoising are rejected because the gate
-// only opens after the speech band stays loud for `attackMs`. A short lookahead delay means the
-// start of a word is not cut off while the gate decides. Gain changes are ramped, so opening and
-// closing never click.
+// only opens after the speech band stays loud for `attackMs`. The gate adds no delay by default:
+// opening takes about 5 ms and fades in over 2 ms, which costs about 1 dB of the first 30 ms of a
+// word. `lookaheadMs` can delay the audio to keep onsets perfect, at the cost of call latency.
+// Gain changes are ramped, so opening and closing never click.
 const BLOCK = 128;
 
 class VoiceGate extends AudioWorkletProcessor {
@@ -11,11 +12,11 @@ class VoiceGate extends AudioWorkletProcessor {
     super();
     const o = options.processorOptions ?? {};
     const ms = value => Math.max(1, Math.round((value * sampleRate) / 1000));
-    this.open = 10 ** ((o.openDb ?? -44) / 20);
+    this.open = 10 ** ((o.openDb ?? -40) / 20);
     this.close = 10 ** ((o.closeDb ?? -50) / 20);
-    this.attackBlocks = Math.max(1, Math.round(ms(o.attackMs ?? 18) / BLOCK));
+    this.attackBlocks = Math.max(1, Math.round(ms(o.attackMs ?? 6) / BLOCK));
     this.holdBlocks = Math.max(1, Math.round(ms(o.holdMs ?? 320) / BLOCK));
-    this.delay = ms(o.lookaheadMs ?? 24);
+    this.delay = Math.max(0, Math.round(((o.lookaheadMs ?? 0) * sampleRate) / 1000));
     this.ring = new Float32Array(this.delay + BLOCK);
     this.write = 0;
     this.rise = 1 - Math.exp(-1 / ms(2));
