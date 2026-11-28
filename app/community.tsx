@@ -2,6 +2,7 @@
 import { Fragment,memo,useCallback,useEffect,useLayoutEffect,useMemo,useRef,useState, type ClipboardEvent, type FormEvent, type HTMLAttributes, type ReactNode } from "react";
 import { AudioLines, Expand, HeadphoneOff, LayoutGrid, Maximize2, MonitorOff, PhoneOff, VideoOff, Volume2, VolumeX, Eye, EyeOff, ChevronDown, ChevronRight, CircleHelp, Copy, CornerUpLeft, Ellipsis, Flag, Headphones, Hash, Link2, LockKeyhole, LogOut, Menu, MessageCircle, MessageSquare, Mic, MicOff, MonitorUp, Paperclip, ArrowDown, Download, FileText, Pencil, Pin, Plus, Reply, Search, Send, Settings, Signal as SignalBars, UserPlus, Shield, Smile, SmilePlus, Trash2, Users, Video, X } from "lucide-react";
 import { ConfirmHost, Modal, confirmAction } from "./dialog";
+import AppearanceSettings from "./appearance-settings";
 import { friendlyError } from "./friendly-error";
 import { useMedia } from "./use-media";
 import QuickSwitcher from "./quick-switcher";
@@ -297,7 +298,7 @@ function Diagnostics({call,latency,errors}:{call:Call|null;latency:number|null;e
     <p>A relay requires configured TURN credentials. If peers stay disconnected, try a different network or ask an administrator to check relay configuration.</p>
   </div>;
 }
-const settingsTabs=[["profile","Profile"],["voice","Voice and video"],["screen","Screen share"],["app","Notifications"]] as const;
+const settingsTabs=[["profile","Profile"],["appearance","Appearance"],["voice","Voice and video"],["screen","Screen share"],["app","Notifications"]] as const;
 function UserSettings({person,prefs,limit,save,report,signOut,localAuth}:{localAuth:boolean;person:Person;prefs:Preferences;limit:number;save:(devices:MediaDevicePreferences)=>void;report:(x:string)=>void;signOut:()=>void}){
   const [tab,setTab]=useState<(typeof settingsTabs)[number][0]>("profile");
   const [picture,setPicture]=useState("");
@@ -388,6 +389,7 @@ function UserSettings({person,prefs,limit,save,report,signOut,localAuth}:{localA
       </div>
       <button type="button" className="signout" onClick={signOut}>Sign out</button>
     </fieldset>
+    {tab==="appearance"&&<AppearanceSettings compact={form.compact} onCompactChange={compact=>change("compact",compact)}/>}
     <fieldset hidden={tab!=="voice"}><legend>Audio and camera</legend>{device("Microphone","input","audioinput")}{device("Speaker","output","audiooutput")}{device("Camera","camera","videoinput")}
       <label>Speaking sensitivity<input type="range" min={1} max={30} value={form.sensitivity} onChange={e=>change("sensitivity",+e.target.value)}/></label>
       <label>Noise suppression<select value={suppressionMode(form)} onChange={e=>{const mode=e.target.value as NonNullable<Preferences["suppression"]>;setForm(f=>({...f,suppression:mode,noise:mode!=="off"}));}}>{suppressionModes.map(m=><option key={m.value} value={m.value}>{m.label}</option>)}</select></label>
@@ -407,7 +409,7 @@ function UserSettings({person,prefs,limit,save,report,signOut,localAuth}:{localA
       :<p>Captures at 1080p 60 FPS, prefers a hardware encoder, and keeps the frame rate steady so your game keeps its frames. If your PC runs short, it steps down to 45 or 30 FPS on its own. Under load it lowers resolution rather than frames. Each viewer needs its own upload of about 10 Mbps. For 120 or 144 FPS, choose Custom.</p>}
       {limit>0&&<small>Community bitrate ceiling {limit.toLocaleString()} Kbps.</small>}
     </fieldset>
-    <fieldset hidden={tab!=="app"}><legend>Appearance and notifications</legend><label className="inline"><input type="checkbox" checked={form.compact} onChange={e=>change("compact",e.target.checked)}/>Compact messages</label>
+    <fieldset hidden={tab!=="app"}><legend>Notifications</legend>
       <label className="inline"><input type="checkbox" checked={form.notifications} onChange={async e=>{const want=e.target.checked;change("notifications",want&&"Notification" in window&&(await Notification.requestPermission())==="granted");}}/>Browser mention and reply notifications</label>
       <label className="inline"><input type="checkbox" checked={form.voiceSounds!==false} onChange={e=>change("voiceSounds",e.target.checked)}/>Voice join and leave sounds</label>
       <div className="join-announcements">
@@ -1024,7 +1026,6 @@ export default function Community({localAuth=false}:{localAuth?:boolean}={}){
   const admin=person?.role==="admin";
   const emptyServer=!!currentServer&&!channels.some(c=>c.server===server);
   const callServer=space?.servers.find(s=>s.id===space.channels.find(c=>c.id===call?.channel)?.server)?.name;
-  // Direct messages belong to no server, so they keep the plain chat colour.
   const backdrop=channel?.kind==="dm"?undefined:serverBackground(currentServer);
   const myTimeout=chatChannel?.server&&person?timeoutOf(person.id,chatChannel.server):undefined;
   const callTitle=space?.channels.find(c=>c.id===call?.channel)?.name;
