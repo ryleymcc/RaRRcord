@@ -232,7 +232,7 @@ async function route(request:Request, env:Cloudflare.Env):Promise<Response> {
       const statements=[
         // A just-joined sender must be visible in the roster for its signal to be processed.
         sql("SELECT id,sender,data FROM signals WHERE channel=? AND recipient=? AND id>? AND expires>? ORDER BY id LIMIT 100",room.channel,peer,number(q.get("signal")),now),
-        sql("SELECT v.peer,v.uid,v.cam,v.screen,u.name FROM voice v JOIN users u ON v.uid=u.id JOIN channels c ON v.channel=c.id WHERE v.channel=? AND v.expires>? AND u.state='approved' AND "+channelAccess("c").replace("ca.uid=?","ca.uid=v.uid").replace("?='admin'","u.role='admin'").replace("ma.uid=?","ma.uid=v.uid")+" AND NOT EXISTS (SELECT 1 FROM blocks b WHERE (b.uid=? AND b.blocked=v.uid) OR (b.uid=v.uid AND b.blocked=?))",room.channel,now,id,id),
+        sql("SELECT v.peer,v.uid,v.cam,v.screen,u.name FROM voice v JOIN users u ON v.uid=u.id JOIN channels c ON v.channel=c.id WHERE v.channel=? AND v.expires>? AND u.state='approved' AND "+channelAccess("c").replace("ca.uid=?","ca.uid=v.uid").replace("?='admin'","u.role='admin'").replace("ma.uid=?","ma.uid=v.uid")+" AND NOT EXISTS (SELECT 1 FROM blocks b WHERE (b.uid=? AND b.blocked=v.uid) OR (b.uid=v.uid AND b.blocked=?)) ORDER BY u.name,v.uid,v.peer",room.channel,now,id,id),
       ];
       // The lease lasts 16 s; renewing once it is under 10 s saves a write on most polls.
       if (room.expires-now<lease-6000) statements.push(sql("UPDATE voice SET expires=? WHERE uid=? AND peer=?",now+lease,id,peer));
@@ -243,7 +243,7 @@ async function route(request:Request, env:Cloudflare.Env):Promise<Response> {
     const rooms=async ()=>{
       if (!q.has("rooms")) return;
       // Everyone currently in a voice room this viewer can see, for the channel sidebar.
-      result.rooms=await all("SELECT v.channel,v.uid,u.name,u.avatar IS NOT NULL AS has_avatar,v.cam,v.screen FROM voice v JOIN users u ON v.uid=u.id JOIN channels c ON v.channel=c.id WHERE v.expires>? AND u.state='approved' AND c.kind='voice' AND "+channelAccess("c")+" AND "+channelAccess("c").replace("ca.uid=?","ca.uid=v.uid").replace("?='admin'","u.role='admin'").replace("ma.uid=?","ma.uid=v.uid")+" AND NOT EXISTS (SELECT 1 FROM blocks b WHERE (b.uid=? AND b.blocked=v.uid) OR (b.uid=v.uid AND b.blocked=?)) ORDER BY u.name",now,...access,id,id);
+      result.rooms=await all("SELECT v.channel,v.uid,u.name,u.avatar IS NOT NULL AS has_avatar,v.cam,v.screen FROM voice v JOIN users u ON v.uid=u.id JOIN channels c ON v.channel=c.id WHERE v.expires>? AND u.state='approved' AND c.kind='voice' AND "+channelAccess("c")+" AND "+channelAccess("c").replace("ca.uid=?","ca.uid=v.uid").replace("?='admin'","u.role='admin'").replace("ma.uid=?","ma.uid=v.uid")+" AND NOT EXISTS (SELECT 1 FROM blocks b WHERE (b.uid=? AND b.blocked=v.uid) OR (b.uid=v.uid AND b.blocked=?)) ORDER BY u.name,v.uid,v.peer",now,...access,id,id);
     };
     await Promise.all([seen,chat(),call(),rooms()]);
     return json(result);

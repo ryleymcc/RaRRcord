@@ -688,7 +688,7 @@ export default function Community(){
     // Your own room comes from the live call roster, which is fresher and knows who is speaking.
     if(call?.channel===id){
       const seen=new Set<string>();
-      return call.participants.filter(p=>!seen.has(p.uid)&&seen.add(p.uid)).map(p=>({uid:p.uid,name:p.name,avatar:avatars.get(p.uid)??false,live:!!p.screen,cam:!!p.cam,speaking:call.speaking(p.peer)})).sort((a,b)=>a.name.localeCompare(b.name));
+      return call.participants.filter(p=>!seen.has(p.uid)&&seen.add(p.uid)).map(p=>({uid:p.uid,name:p.name,avatar:avatars.get(p.uid)??false,live:!!p.screen,cam:!!p.cam,speaking:call.speaking(p.peer)})).sort((a,b)=>a.name.localeCompare(b.name)||a.uid.localeCompare(b.uid));
     }
     return rooms.filter(r=>r.channel===id).map(r=>({uid:r.uid,name:r.name,avatar:!!r.has_avatar,live:!!r.screen,cam:!!r.cam,speaking:false}));
   };
@@ -696,8 +696,8 @@ export default function Community(){
   const callTitle=space?.channels.find(c=>c.id===call?.channel)?.name;
   const feeds=call?.feeds.filter(f=>f.kind!=="voice")??[];
   const screens=feeds.filter(f=>f.kind==="screen");
-  // Focus view puts whoever is talking first, so they get the large tile when nobody is sharing.
-  const stagePeople=call?(speaker?[...call.participants].sort((a,b)=>Number(call.speaking(b.peer))-Number(call.speaking(a.peer))):call.participants):[];
+  // Tiles keep a fixed order (name, then user, then join) so profiles never move when someone talks, joins or the roster is re-polled.
+  const stagePeople=call?[...call.participants].sort((a,b)=>a.name.localeCompare(b.name)||a.uid.localeCompare(b.uid)||a.peer.localeCompare(b.peer)):[];
   const ownCam=call?.local.get("cam");
   const ownScreen=screenPreview?call?.local.get("screen"):undefined;
   // Volumes are saved per user, so a peer (one join of a call) is looked up to its user first.
