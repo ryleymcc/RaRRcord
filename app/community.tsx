@@ -5,6 +5,7 @@ import { ConfirmHost, Modal, confirmAction } from "./dialog";
 import { friendlyError } from "./friendly-error";
 import { useMedia } from "./use-media";
 import QuickSwitcher from "./quick-switcher";
+import ModerateMember, { timeLeft } from "./moderate-member";
 import { isImage, typingText, uploadWithProgress } from "./upload";
 import { cleanAnnouncements, joinAnnouncement, playVoiceCue, speakAnnouncement } from "./voice-sounds";
 import { canBoost, route, setGain, type Route, loadScreenPreview, loadVolumes, maxVolume, saveScreenPreview, setVolume, streamVolumeKey } from "./user-volume";
@@ -16,7 +17,7 @@ import { DiagnosticCharts, WebRtcInternals } from "./diagnostic-charts";
 import { diagnosticSample, type DiagnosticSample } from "./diagnostic-data";
 import EmojiPicker from "./emoji-picker";
 
-type Workspace={servers:Server[]; channels:Channel[]; people:Person[]; settings:{key:string;value:string}[];prefs:Partial<Preferences>;moderates?:string[]};
+type Workspace={servers:Server[]; channels:Channel[]; people:Person[]; settings:{key:string;value:string}[];prefs:Partial<Preferences>;moderates?:string[];timeouts?:{server:string;uid:string;timeout:number}[]};
 type Auth={user:Person|null;active:boolean;ownerConfigured?:boolean};
 type History={messages:Message[];cursor:number};
 type RoomMember={channel:string;uid:string;name:string;has_avatar:boolean;cam:number;screen:number};
@@ -34,11 +35,12 @@ function Avatar({name,uid,has,status}:{name:string;uid:string;has?:boolean;statu
 type VoiceMember={uid:string;name:string;avatar:boolean;live:boolean;cam:boolean;speaking:boolean};
 // Dragging a person between voice rooms carries their user id under this type.
 const voiceMoveType="application/x-rarrcord-voice-member";
-function VoiceMembers({members,movable,dropProps}:{members:VoiceMember[];movable:boolean;dropProps?:HTMLAttributes<HTMLElement>}){
+function VoiceMembers({members,movable,dropProps,manage}:{members:VoiceMember[];movable:boolean;dropProps?:HTMLAttributes<HTMLElement>;manage?:(uid:string)=>void}){
   if(!members.length)return null;
   return <ul className="voice-members" aria-label="In this voice room" {...dropProps}>{members.map(m=><li key={m.uid} className={(m.speaking?"speaking":"")+(movable?" movable":"")}
     draggable={movable||undefined} title={movable?"Drag to another voice room to move "+m.name:undefined}
-    onDragStart={movable?e=>{e.dataTransfer.setData(voiceMoveType,m.uid);e.dataTransfer.setData("text/plain",m.name);e.dataTransfer.effectAllowed="move";}:undefined}>
+    onDragStart={movable?e=>{e.dataTransfer.setData(voiceMoveType,m.uid);e.dataTransfer.setData("text/plain",m.name);e.dataTransfer.effectAllowed="move";}:undefined}
+    onContextMenu={manage?e=>{e.preventDefault();manage(m.uid);}:undefined}>
     <Avatar name={m.name} uid={m.uid} has={m.avatar}/><span>{m.name}</span>{m.cam&&<Video size={13} aria-label="Camera on"/>}{m.live&&<b className="live-tag">LIVE</b>}
   </li>)}</ul>;
 }
@@ -591,6 +593,13 @@ export default function Community({localAuth=false}:{localAuth?:boolean}={}){
   };});
   const [dropRoom,setDropRoom]=useState("");
   // Only people you may move can be dragged, and only onto voice rooms of the same server.
+  const [moderating,setModerating]=useState("");
+  // Timeouts count down against this clock, which ticks every 15 seconds.
+  const [clock,setClock]=useState(()=>Date.now());
+  useEffect(()=>{const timer=setInterval(()=>setClock(Date.now()),15000);return ()=>clearInterval(timer);},[]);
+  // Right-clicking someone in a voice room, or "Moderate" in the member list, opens their member actions.
+  const manage=(uid:string)=>{if(uid!==person?.id){setModerating(uid);setModal("moderate");}};
+  const timeoutOf=(uid:string,serverId=server)=>space?.timeouts?.find(t=>t.uid===uid&&t.server===serverId&&t.timeout>clock)?.timeout;
   const canMove=(c:Channel)=>c.kind==="voice"&&!!c.server&&!!space?.moderates?.includes(c.server);
   async function moveMember(uid:string,room:Channel){
     try{
@@ -748,6 +757,7 @@ export default function Community({localAuth=false}:{localAuth?:boolean}={}){
     return rooms.filter(r=>r.channel===id).map(r=>({uid:r.uid,name:r.name,avatar:!!r.has_avatar,live:!!r.screen,cam:!!r.cam,speaking:false})).sort((a,b)=>a.name.localeCompare(b.name)||a.uid.localeCompare(b.uid));
   };
   const currentServer=space?.servers.find(s=>s.id===server);
+  const myTimeout=chatChannel?.server&&person?timeoutOf(person.id,chatChannel.server):undefined;
   const callTitle=space?.channels.find(c=>c.id===call?.channel)?.name;
   const feeds=call?.feeds.filter(f=>f.kind!=="voice")??[];
   const screens=feeds.filter(f=>f.kind==="screen");
@@ -780,7 +790,7 @@ export default function Community({localAuth=false}:{localAuth?:boolean}={}){
         {!space&&<div className="skeleton-list" aria-label="Loading channels">{[60,75,50,0,55,70].map((w,i)=>w?<span key={i} className="skeleton" style={{width:w+"%"}}/>:<br key={i}/>)}</div>}
         {groups.map(group=><details key={group} open><summary><ChevronDown size={14}/>{group}</summary>{channels.filter(c=>(c.category||"Channels")===group).map(c=><Fragment key={c.id}><button className={"channel "+(selected===c.id?"selected":"")+(dropRoom===c.id?" drop-target":"")} onClick={()=>choose(c)} {...(c.kind==="voice"?dropProps(c):undefined)}>
           {c.kind==="voice"?<AudioLines size={17}/>:c.kind==="private"?<LockKeyhole size={15}/>:<Hash size={17}/>}<span>{c.name}</span>{c.unread>0&&chatId!==c.id&&<b className="badge">{c.unread>99?"99+":c.unread}</b>}{call?.channel===c.id&&<i className="voice-dot"/>}
-        </button>{c.kind==="voice"&&<VoiceMembers members={membersOf(c.id)} movable={canMove(c)} dropProps={dropProps(c)}/>}</Fragment>)}</details>)}
+        </button>{c.kind==="voice"&&<VoiceMembers members={membersOf(c.id)} movable={canMove(c)} dropProps={dropProps(c)} manage={canMove(c)?manage:undefined}/>}</Fragment>)}</details>)}
         <button className="channel dm-button" onClick={()=>{setDmUsers([]);setModal("dm");}}><Plus size={16}/><span>New direct message</span></button>
       </div>
       {call&&<div className="voice-status"><div><b><i className="voice-dot"/> Voice connected</b><span>{callTitle}</span></div>
@@ -885,7 +895,7 @@ export default function Community({localAuth=false}:{localAuth?:boolean}={}){
               const file=event.currentTarget.files?.[0];event.currentTarget.value="";if(file)selectGif(file);
             }}/>
             <IconButton label="Attach file" onClick={()=>upload.current?.click()}><Paperclip size={20}/></IconButton>
-            <textarea ref={draftInput} rows={1} maxLength={8000} value={draft} placeholder={"Message "+chatChannel.name} aria-label={"Message "+chatChannel.name} onChange={event=>changeDraft(event.target.value)} onPaste={pasteGif} onKeyDown={e=>{
+            <textarea ref={draftInput} rows={1} maxLength={8000} value={draft} disabled={!!myTimeout} placeholder={myTimeout?"You are timed out in this server for "+timeLeft(myTimeout-clock)+".":"Message "+chatChannel.name} aria-label={"Message "+chatChannel.name} onChange={event=>changeDraft(event.target.value)} onPaste={pasteGif} onKeyDown={e=>{
               if(e.nativeEvent.isComposing)return;
               if(e.key==="Enter"&&!e.shiftKey){e.preventDefault();e.currentTarget.form?.requestSubmit();}
               else if(e.key==="Escape"&&(edit||reply)&&!picker){e.preventDefault();if(edit)setDraft("");setEdit(null);setReply(null);}
@@ -903,16 +913,25 @@ export default function Community({localAuth=false}:{localAuth?:boolean}={}){
     </main>
     {members&&<aside className="members-pane"><div className="members-title"><h2>Members</h2><span>{space?.people.length??""}</span></div>
       {!space&&<div className="skeleton-list members-skel" aria-label="Loading members">{[55,70,45,60].map((w,i)=><div key={i}><span className="skeleton avatar-skel"/><span className="skeleton" style={{width:w+"%"}}/></div>)}</div>}
-      {["online","offline"].map(group=><section key={group}><h3>{group==="online"?"Available":"Offline"}</h3>{space?.people.filter(p=>group==="offline"?p.status==="offline":p.status!=="offline").map(p=><details className="member" key={p.id}><summary><Avatar name={p.name} uid={p.id} has={p.avatar} status={p.status}/><span><b>{p.name}</b><small>@{p.username}{p.role==="admin"?" · Admin":""}</small></span></summary>
-        {p.id!==person?.id&&<div className="member-menu"><button onClick={()=>{setDmUsers([p.id]);setModal("dm");}}>Message</button><button onClick={async()=>{try{await request("block",{users:[p.id]});report("Member blocked.");}catch(e){report((e as Error).message);}}}>Block</button><button onClick={()=>void request("block",{users:[p.id],remove:true}).then(()=>report("Member unblocked.")).catch(e=>report(e.message))}>Unblock</button></div>}
+      {["online","offline"].map(group=><section key={group}><h3>{group==="online"?"Available":"Offline"}</h3>{space?.people.filter(p=>group==="offline"?p.status==="offline":p.status!=="offline").map(p=><details className="member" key={p.id}><summary><Avatar name={p.name} uid={p.id} has={p.avatar} status={p.status}/><span><b>{p.name}</b><small>@{p.username}{p.role==="admin"?" · Admin":""}{timeoutOf(p.id)?" · Timed out":""}</small></span></summary>
+        {p.id!==person?.id&&<div className="member-menu"><button onClick={()=>{setDmUsers([p.id]);setModal("dm");}}>Message</button><button onClick={async()=>{try{await request("block",{users:[p.id]});report("Member blocked.");}catch(e){report((e as Error).message);}}}>Block</button><button onClick={()=>void request("block",{users:[p.id],remove:true}).then(()=>report("Member unblocked.")).catch(e=>report(e.message))}>Unblock</button>{space?.moderates?.includes(server)&&p.role!=="admin"&&<button onClick={()=>manage(p.id)}>Moderate</button>}</div>}
       </details>)}</section>)}
     </aside>}
     {sheetOpen&&<div className="scrim" aria-hidden="true" onClick={()=>{setMobile(false);setMembersSheet(false);}}/>}
     <div className="toast-region" role="status" aria-live="polite">{toast&&<div className="toast">{toast}<IconButton label="Dismiss" onClick={()=>setToast("")}><X size={16}/></IconButton></div>}</div>
     <ConfirmHost/>
-    {modal&&<Modal key={modal} wide={modal==="admin"} className={modal==="switch"?"switch-dialog":""} onClose={()=>setModal("")} title={({admin:"Administration",settings:"User settings",diagnostics:"Connection diagnostics",dm:"Direct message",help:"RaRRcord help",switch:"Jump to"} as Record<string,string>)[modal]}>
+    {modal&&<Modal key={modal} wide={modal==="admin"} className={modal==="switch"?"switch-dialog":""} onClose={()=>setModal("")} title={modal==="moderate"?"Moderate "+(space?.people.find(p=>p.id===moderating)?.name??"member"):({admin:"Administration",settings:"User settings",diagnostics:"Connection diagnostics",dm:"Direct message",help:"RaRRcord help",switch:"Jump to"} as Record<string,string>)[modal]}>
       {modal==="settings"&&person&&<><UserSettings localAuth={localAuth} person={person} prefs={prefs} limit={limit} save={()=>{void refresh();void refreshAuth();setModal("");report(call?"Settings saved. Rejoin the call to apply media changes.":"Settings saved.");}} report={report} signOut={logout}/></>}
       {modal==="diagnostics"&&<Diagnostics call={call} latency={latency} errors={errors}/>}
+      {modal==="moderate"&&space&&(()=>{
+        const target=space.people.find(p=>p.id===moderating);
+        if(!target)return <p>That member is no longer available.</p>;
+        const voiceRooms=space.channels.filter(c=>c.server===server&&c.kind==="voice");
+        const room=call?.participants.some(p=>p.uid===target.id)&&call.channel&&voiceRooms.some(r=>r.id===call.channel)?call.channel:rooms.find(r=>r.uid===target.id&&voiceRooms.some(v=>v.id===r.channel))?.channel;
+        return <ModerateMember person={target} server={server} serverName={currentServer?.name??"this server"} rooms={voiceRooms} room={room} until={timeoutOf(target.id)} now={clock}
+          canMove={!!space.moderates?.includes(server)} move={async r=>{await moveMember(target.id,r);setModal("");}}
+          done={message=>{roomsAt.current=0;void refresh();setModal("");setToast(message);}} report={report}/>;
+      })()}
       {modal==="admin"&&space&&<Admin space={space} server={server} report={report} refresh={refresh}/>}
       {modal==="dm"&&<form className="settings-form" onSubmit={async e=>{e.preventDefault();try{const result=await request<{id:string}>("dm",{users:dmUsers});await refresh();setSelected(result.id);setStage(false);setModal("");}catch(e){report((e as Error).message);}}}>
         {space?.people.filter(p=>p.id!==person?.id).map(p=><label className="inline" key={p.id}><input type="checkbox" checked={dmUsers.includes(p.id)} onChange={e=>setDmUsers(prev=>e.target.checked?[...prev,p.id]:prev.filter(id=>id!==p.id))}/>{p.name}</label>)}

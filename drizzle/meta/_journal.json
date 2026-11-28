@@ -29,6 +29,13 @@
       "when": 1795833725065,
       "tag": "0003_server_picture",
       "breakpoints": true
+    },
+    {
+      "idx": 4,
+      "version": "6",
+      "when": 1795835425164,
+      "tag": "0004_member_timeout",
+      "breakpoints": true
     }
   ]
 }

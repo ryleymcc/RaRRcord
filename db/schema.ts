@@ -10,7 +10,9 @@ export const sessions = table("sessions", {
   token: text().primaryKey(), uid: text().notNull(), epoch: integer().notNull(), expires: integer().notNull(),
 }, t => [index("sessions_expiry").on(t.uid, t.expires)]);
 export const servers = table("servers", { id: text().primaryKey(), name: text().notNull(), icon: text(), picture: text() });
-export const members = table("members", { server: text().notNull(), uid: text().notNull(), role: text().notNull().default("member") },
+export const members = table("members", { server: text().notNull(), uid: text().notNull(), role: text().notNull().default("member"),
+  // Timed out until this time (ms since the epoch); 0 when not timed out.
+  timeout: integer().notNull().default(0) },
   t => [primaryKey({columns:[t.server,t.uid]})]);
 export const roles = table("roles", { server:text().notNull(), name:text().notNull() }, t=>[primaryKey({columns:[t.server,t.name]})]);
 export const channels = table("channels", {
