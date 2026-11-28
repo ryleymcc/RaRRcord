@@ -35,8 +35,8 @@ export default function Admin({space,server,report,refresh}:{space:Workspace;ser
       {!data.users.some(u=>u.state==="pending")&&<p>No pending requests.</p>}
       <h3>Accounts</h3>
       {data.users.filter(u=>u.state!=="pending").map(u=><form className="admin-row" key={u.id+"-"+u.state+"-"+u.role} onSubmit={e=>void act({action:"account",target:u.id,...form(e)})}>
-        <span><strong>{u.name}</strong><small>@{u.username} · {u.status}</small></span>
-        <select aria-label={"Status for "+u.name} name="state" defaultValue={u.state}>{["approved","suspended","banned","deleted"].map(s=><option key={s}>{s}</option>)}</select>
+        <span><strong>{u.name}</strong><small>@{u.username} · {({online:"Online",idle:"Idle",dnd:"Do not disturb",offline:"Invisible"} as Record<string,string>)[u.status]??u.status}</small></span>
+        <select aria-label={"Status for "+u.name} name="state" defaultValue={u.state}>{["approved","suspended","banned","deleted"].map(s=><option key={s} value={s}>{s[0].toUpperCase()+s.slice(1)}</option>)}</select>
         <select aria-label={"Role for "+u.name} name="role" defaultValue={u.role}><option value="member">Member</option><option value="admin">Administrator</option></select>
         <button>Save</button><button type="button" onClick={()=>void act({action:"revoke",target:u.id})}>Revoke sessions</button>
       </form>)}
