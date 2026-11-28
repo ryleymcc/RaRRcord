@@ -2,6 +2,7 @@ import { EMAIL_HEADER, ID_HEADER, signOutPath } from "./identity.ts";
 import { localOrigin, localLogout } from "./local-auth.ts";
 import { allow, dailyUploadBytes, readLimits } from "./limits.ts";
 import { backgroundPresets } from "../lib/backgrounds.ts";
+import { mentionsUser } from "../lib/chat-mentions.ts";
 
 type Value = string | number | null;
 type User = { id:string; username:string; name:string; state:string; role:string; status:string; seen:number; avatar:string|null; epoch:number; prefs:string };
@@ -67,10 +68,10 @@ function cookie(value:string, age:number) {
 const view = (u:User) => ({
   id:u.id, name:u.name, username:u.username, role:u.role, state:u.state, status:u.status, avatar:!!u.avatar,
 });
-const channelAccess = (alias:string) => [
-  "(("+alias+".kind IN ('dm','private') AND EXISTS (SELECT 1 FROM channel_members ca WHERE ca.channel="+alias+".id AND ca.uid=? AND ("+alias+".kind='dm' OR EXISTS (SELECT 1 FROM members pm WHERE pm.server="+alias+".server AND pm.uid=ca.uid))))",
-  "OR ("+alias+".kind NOT IN ('dm','private') AND (?='admin' OR EXISTS",
-  "(SELECT 1 FROM members ma WHERE ma.server="+alias+".server AND ma.uid=?",
+const channelAccess = (alias:string,uid="?",role="?") => [
+  "(("+alias+".kind IN ('dm','private') AND EXISTS (SELECT 1 FROM channel_members ca WHERE ca.channel="+alias+".id AND ca.uid="+uid+" AND ("+alias+".kind='dm' OR EXISTS (SELECT 1 FROM members pm WHERE pm.server="+alias+".server AND pm.uid=ca.uid))))",
+  "OR ("+alias+".kind NOT IN ('dm','private') AND ("+role+"='admin' OR EXISTS",
+  "(SELECT 1 FROM members ma WHERE ma.server="+alias+".server AND ma.uid="+uid,
   "AND ("+alias+".permission='' OR "+alias+".permission=ma.role OR ma.role='moderator')))))",
 ].join(" ");
 export async function api(request:Request, env:Cloudflare.Env):Promise<Response> {
@@ -210,9 +211,17 @@ async function route(request:Request, env:Cloudflare.Env):Promise<Response> {
   };
   const changed=(channel:string, mid:number)=>sql("INSERT INTO events(channel,mid,time) VALUES(?,?,?)",channel,mid,now);
   const messageQuery=(clause:string, args:Value[], order:string, limit:number)=>
-    sql("SELECT m.*,u.name,u.username,u.avatar IS NOT NULL AS has_avatar,(SELECT json_group_object(emoji,count) FROM (SELECT emoji,COUNT(*) count FROM reactions WHERE mid=m.id GROUP BY emoji)) AS reactions,(SELECT json_group_array(emoji) FROM reactions WHERE mid=m.id AND uid=?) AS my_reactions FROM messages m JOIN users u ON u.id=m.uid WHERE "+clause+" ORDER BY "+order+" LIMIT ?",id,...args,limit);
+    sql(`SELECT m.*,u.name,u.username,u.avatar IS NOT NULL AS has_avatar,
+      (SELECT json_group_object(emoji,count) FROM (SELECT emoji,COUNT(*) count FROM reactions WHERE mid=m.id GROUP BY emoji)) AS reactions,
+      (SELECT json_group_array(emoji) FROM reactions WHERE mid=m.id AND uid=?) AS my_reactions,
+      (SELECT json_object('uid',p.uid,'name',pu.name,'username',pu.username,'has_avatar',pu.avatar IS NOT NULL,'body',substr(p.body,1,500),'filename',p.filename)
+        FROM messages p JOIN users pu ON pu.id=p.uid WHERE p.id=m.reply AND p.channel=m.channel AND p.deleted=0) AS reply_preview
+      FROM messages m JOIN users u ON u.id=m.uid WHERE `+clause+" ORDER BY "+order+" LIMIT ?",id,...args,limit);
+  const messageRows=(rows:Record<string,unknown>[])=>rows.map(({reply_preview,...row})=>({
+    ...row,replyPreview:typeof reply_preview==="string"?JSON.parse(reply_preview):null,
+  }));
   const readMessages=async (clause:string, args:Value[], order:string, limit:number)=>
-    (await messageQuery(clause,args,order,limit).all()).results;
+    messageRows((await messageQuery(clause,args,order,limit).all()).results);
   if (path==="workspace" && !write) {
     return json({
       // "picture" is only a short version tag for cache busting; the storage key itself stays on the server.
@@ -232,12 +241,25 @@ async function route(request:Request, env:Cloudflare.Env):Promise<Response> {
   }
   if (path==="history" && !write) {
     const c=await chan(cid());
+    if(q.has("around")){
+      const target=number(q.get("around"));
+      const [older,newer]=await many([
+        messageQuery("m.channel=? AND m.id<? AND m.deleted=0",[c.id,target],"m.id DESC",24),
+        messageQuery("m.channel=? AND m.id>=? AND m.deleted=0",[c.id,target],"m.id",26),
+      ]);
+      if(newer[0]?.id!==target)deny(404,"Original message unavailable.");
+      return json({messages:messageRows([...older.reverse(),...newer])});
+    }
     const before=number(q.get("before"),Number.MAX_SAFE_INTEGER);
     const search=q.get("search")?.trim().slice(0,100);
     const cursor=await one<{id:number}>("SELECT COALESCE(MAX(id),0) id FROM events WHERE channel=?",c.id);
     const rows=await readMessages("m.channel=? AND m.id<? AND m.deleted=0"+(search?" AND instr(lower(m.body),lower(?))>0":"")+(q.has("pinned")?" AND m.pinned=1":""),
       search?[c.id,before,search]:[c.id,before],"m.id DESC",50);
-    return json({messages:rows.reverse(),cursor:cursor?.id??0});
+    const mentionPeople=q.has("mentions")?await all(
+      "SELECT u.id,u.name,u.username,u.avatar IS NOT NULL AS avatar FROM users u JOIN channels c ON c.id=? WHERE u.id<>? AND u.state='approved' AND "+channelAccess("c","u.id","u.role")+" ORDER BY u.name COLLATE NOCASE,u.id",
+      c.id,id,
+    ):undefined;
+    return json({messages:rows.reverse(),cursor:cursor?.id??0,mentionPeople});
   }
   if (path==="poll" && !write) {
     const seen=account.seen<now-9000 ? run("UPDATE users SET seen=? WHERE id=?",now,id) : null;
@@ -253,8 +275,28 @@ async function route(request:Request, env:Cloudflare.Env):Promise<Response> {
         sql("SELECT u.name FROM typing t JOIN users u ON t.uid=u.id WHERE t.channel=? AND t.expires>? AND t.uid<>? AND u.state='approved'",c.id,now,id),
       ]);
       result.cursor=(events.at(-1)?.id as number|undefined)??after;
-      result.messages=messages;
+      result.messages=messageRows(messages);
       result.typing=typing;
+    };
+    const notices=async ()=>{
+      const since=q.get("notices");
+      if(since===null)return;
+      const latest=sql("SELECT COALESCE(MAX(id),0) AS id FROM messages");
+      if(since==="latest"){
+        result.noticeCursor=(await latest.first<{id:number}>())?.id??0;
+        return;
+      }
+      const after=number(since);
+      const [high,rows]=await many([latest,sql(`SELECT m.id,m.channel,m.body,c.name AS channel_name,u.name AS sender,p.uid AS reply_uid
+        FROM messages m JOIN channels c ON c.id=m.channel JOIN users u ON u.id=m.uid
+        LEFT JOIN messages p ON p.id=m.reply AND p.channel=m.channel AND p.deleted=0
+        WHERE m.id>? AND m.uid<>? AND m.deleted=0 AND `+channelAccess("c")+" ORDER BY m.id LIMIT 100",after,id,...access)]);
+      result.noticeCursor=Math.max(after,Number(rows.length===100?rows.at(-1)?.id:high[0]?.id));
+      result.notices=rows.flatMap(row=>{
+        const mentioned=mentionsUser(row.body as string,account.username);
+        if(!mentioned&&row.reply_uid!==id)return [];
+        return [{id:row.id,channel:row.channel,channelName:row.channel_name,sender:row.sender,mentioned}];
+      });
     };
     const call=async ()=>{
       if (!q.has("peer")) return;
@@ -283,7 +325,7 @@ async function route(request:Request, env:Cloudflare.Env):Promise<Response> {
       // Everyone currently in a voice room this viewer can see, for the channel sidebar.
       result.rooms=await all("SELECT v.channel,v.uid,u.name,u.avatar IS NOT NULL AS has_avatar,v.cam,v.screen,v.joined FROM voice v JOIN users u ON v.uid=u.id JOIN channels c ON v.channel=c.id WHERE v.expires>? AND u.state='approved' AND c.kind='voice' AND "+channelAccess("c")+" AND "+channelAccess("c").replace("ca.uid=?","ca.uid=v.uid").replace("?='admin'","u.role='admin'").replace("ma.uid=?","ma.uid=v.uid")+" AND NOT EXISTS (SELECT 1 FROM blocks b WHERE (b.uid=? AND b.blocked=v.uid) OR (b.uid=v.uid AND b.blocked=?)) ORDER BY v.joined,u.name COLLATE NOCASE,v.uid",now,...access,id,id);
     };
-    await Promise.all([seen,chat(),call(),rooms()]);
+    await Promise.all([seen,chat(),call(),rooms(),notices()]);
     return json(result);
   }
   if (path==="ice" && !write) {
@@ -400,7 +442,7 @@ async function route(request:Request, env:Cloudflare.Env):Promise<Response> {
     if (serverImage && !await one("SELECT 1 FROM servers WHERE id=?",serverId)) deny(404,"Server unavailable.");
     const gif=c && data.get("gif")==="1";
     const caption=gif?string(data.get("text")??"",8000,0):"";
-    const reply=gif && data.has("reply")?number(data.get("reply")):null;
+    const reply=c && data.has("reply")?number(data.get("reply")):null;
     if (c) await checkMessageTarget(c,reply);
     let filename=file.name.replace(/[\u0000-\u001f\u007f]/g,"").slice(0,180)||"attachment";
     const head=new Uint8Array(await file.slice(0,16).arrayBuffer());
