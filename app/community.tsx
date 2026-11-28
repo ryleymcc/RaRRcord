@@ -226,7 +226,7 @@ function Diagnostics({call,latency,errors}:{call:Call|null;latency:number|null;e
   </div>;
 }
 const settingsTabs=[["profile","Profile"],["voice","Voice and video"],["screen","Screen share"],["app","Notifications"]] as const;
-function UserSettings({person,prefs,limit,save,report,signOut}:{person:Person;prefs:Preferences;limit:number;save:()=>void;report:(x:string)=>void;signOut:()=>void}){
+function UserSettings({person,prefs,limit,save,report,signOut,localAuth}:{localAuth:boolean;person:Person;prefs:Preferences;limit:number;save:()=>void;report:(x:string)=>void;signOut:()=>void}){
   const [tab,setTab]=useState<(typeof settingsTabs)[number][0]>("profile");
   const [picture,setPicture]=useState("");
   const [uploading,setUploading]=useState(false);
@@ -282,10 +282,10 @@ function UserSettings({person,prefs,limit,save,report,signOut}:{person:Person;pr
   useEffect(()=>()=>{if(picture)URL.revokeObjectURL(picture);},[picture]);
   return <form className="settings-form settings-tabs" onInvalidCapture={()=>setTab("profile")} onSubmit={async(e)=>{
     e.preventDefault();
-    try{await request("profile",{name,status,prefs:{...form,joinAnnouncements:cleanAnnouncements(form.joinAnnouncements)}});save();}catch(e){report((e as Error).message);}
+    try{await request("profile",{...(localAuth?{}:{name}),status,prefs:{...form,joinAnnouncements:cleanAnnouncements(form.joinAnnouncements)}});save();}catch(e){report((e as Error).message);}
   }}>
     <nav className="tabs" role="tablist" aria-label="Settings sections">{settingsTabs.map(([id,label])=><button type="button" role="tab" key={id} aria-selected={tab===id} className={tab===id?"active":""} onClick={()=>setTab(id)}>{label}</button>)}</nav>
-    <fieldset hidden={tab!=="profile"}><legend>Profile</legend><label>Display name<input required maxLength={40} value={name} onChange={e=>setName(e.target.value)}/></label>
+    <fieldset hidden={tab!=="profile"}><legend>Profile</legend>{localAuth?<p>Display name: {person.username}</p>:<label>Display name<input autoComplete="off" required maxLength={40} value={name} onChange={e=>setName(e.target.value)}/></label>}
       <label>Status<select value={status} onChange={e=>setStatus(e.target.value)}>{statuses.map(([s,label])=><option value={s} key={s}>{label}</option>)}</select></label>
       <div className="avatar-picker"><span className="avatar-large">{picture?<img src={picture} alt=""/>:<Avatar name={name||person.name} uid={person.id} has={person.avatar}/>}</span>
         <div><b>Profile picture</b><small>PNG, JPEG, WebP or GIF.</small></div>
@@ -337,7 +337,7 @@ function UserSettings({person,prefs,limit,save,report,signOut}:{person:Person;pr
     <footer className="save-bar"><span>{dirty?"You have unsaved changes.":""}</span><a href="/privacy">Privacy</a><button className="primary" disabled={!dirty}>Save changes</button></footer>
   </form>;
 }
-export default function Community(){
+export default function Community({localAuth=false}:{localAuth?:boolean}={}){
   const [auth,setAuth]=useState<Auth|null>(null);
   const [space,setSpace]=useState<Workspace|null>(null);
   const [server,setServer]=useState("community");
@@ -612,7 +612,7 @@ export default function Community(){
     event.preventDefault();
     const data=new FormData(event.currentTarget);
     try{
-      const result=await request<Auth>("enroll",Object.fromEntries(data.entries()));
+      const result=await request<Auth>("enroll",localAuth?{}:Object.fromEntries(data.entries()));
       setAuth(result);
     }catch(e){report((e as Error).message);}
   }
@@ -727,8 +727,8 @@ export default function Community(){
   }
   if(!auth?.active){
     return <main className="entry"><section className="entry-card"><span className="brand-mark">R</span><h1>RaRRcord</h1>
-      {!auth?<p>{toast||"Checking your ChatGPT session…"}</p>:!person?
-        <><p>Set up your profile to request access to the community.</p><form className="settings-form" onSubmit={enroll}><label>Username<input name="username" required minLength={3} maxLength={24} pattern="[A-Za-z0-9_]+" autoComplete="username"/></label><label>Display name<input name="name" required maxLength={40}/></label><label>Invitation code (optional)<input name="invite" maxLength={64} autoComplete="off"/></label><button className="primary">Continue</button></form></>:
+      {!auth?<p>{toast||"Checking your session…"}</p>:!person?
+        <><p>Set up your profile to request access to the community.</p><form className="settings-form" onSubmit={enroll} autoComplete="off">{localAuth?<p>Your sign-in username will be your public display name.</p>:<><label>Username<input name="username" required minLength={3} maxLength={24} pattern="[A-Za-z0-9_]+" autoComplete="username"/></label><label>Display name<input name="name" autoComplete="off" required maxLength={40}/></label><label>Invitation code (optional)<input name="invite" maxLength={64} autoComplete="off"/></label></>}<button className="primary">Continue</button></form></>:
         person.state==="approved"?<><p>Continue to your RaRRcord session.</p><form onSubmit={enroll}><button className="primary">Continue</button></form></>:
         <><h2>{person.state==="pending"?"Approval pending":"Account unavailable"}</h2><p>{person.state==="pending"?"A community administrator needs to approve your request.":"Contact your community administrator to check your access."}</p><button onClick={refreshAuth}>Check status</button></>}
       {toast&&auth&&<div role="status" className="form-error">{toast}</div>}
@@ -910,7 +910,7 @@ export default function Community(){
     <div className="toast-region" role="status" aria-live="polite">{toast&&<div className="toast">{toast}<IconButton label="Dismiss" onClick={()=>setToast("")}><X size={16}/></IconButton></div>}</div>
     <ConfirmHost/>
     {modal&&<Modal key={modal} wide={modal==="admin"} className={modal==="switch"?"switch-dialog":""} onClose={()=>setModal("")} title={({admin:"Administration",settings:"User settings",diagnostics:"Connection diagnostics",dm:"Direct message",help:"RaRRcord help",switch:"Jump to"} as Record<string,string>)[modal]}>
-      {modal==="settings"&&person&&<><UserSettings person={person} prefs={prefs} limit={limit} save={()=>{void refresh();void refreshAuth();setModal("");report(call?"Settings saved. Rejoin the call to apply media changes.":"Settings saved.");}} report={report} signOut={logout}/></>}
+      {modal==="settings"&&person&&<><UserSettings localAuth={localAuth} person={person} prefs={prefs} limit={limit} save={()=>{void refresh();void refreshAuth();setModal("");report(call?"Settings saved. Rejoin the call to apply media changes.":"Settings saved.");}} report={report} signOut={logout}/></>}
       {modal==="diagnostics"&&<Diagnostics call={call} latency={latency} errors={errors}/>}
       {modal==="admin"&&space&&<Admin space={space} server={server} report={report} refresh={refresh}/>}
       {modal==="dm"&&<form className="settings-form" onSubmit={async e=>{e.preventDefault();try{const result=await request<{id:string}>("dm",{users:dmUsers});await refresh();setSelected(result.id);setStage(false);setModal("");}catch(e){report((e as Error).message);}}}>

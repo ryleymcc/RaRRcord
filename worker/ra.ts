@@ -1,4 +1,5 @@
 import { EMAIL_HEADER, ID_HEADER, signOutPath } from "./identity.ts";
+import { localOrigin, localLogout } from "./local-auth.ts";
 import { allow, dailyUploadBytes, readLimits } from "./limits.ts";
 
 type Value = string | number | null;
@@ -76,7 +77,7 @@ async function route(request:Request, env:Cloudflare.Env):Promise<Response> {
   const now=Date.now();
   const write=request.method==="POST";
   if (!write && request.method!=="GET") deny(405,"Method unsupported.");
-  if (write && request.headers.get("origin")!==url.origin) deny(403,"This request must come from RaRRcord.");
+  if (write && request.headers.get("origin")!==(env.RARRCORD_AUTH==="local" ? localOrigin(env) : url.origin)) deny(403,"This request must come from RaRRcord.");
   // Set only by worker/identity.ts after it verifies the sign-in.
   const id=request.headers.get(ID_HEADER);
   const email=request.headers.get(EMAIL_HEADER);
@@ -120,8 +121,11 @@ async function route(request:Request, env:Cloudflare.Env):Promise<Response> {
   if (path==="enroll" && write) {
     if (!user) {
       const owner=!!env.RARRCORD_OWNER_EMAIL && email.toLowerCase()===env.RARRCORD_OWNER_EMAIL.trim().toLowerCase();
-      const username=string(body.username,24,3).toLowerCase();
-      const name=label(body.name ?? username,40);
+      const local=env.RARRCORD_AUTH==="local";
+      const username=local ? id.slice(6) : string(body.username,24,3).toLowerCase();
+      if (local && (!id.startsWith("local:") || (body.username!==undefined && body.username!==username))) deny(400,"Use your sign-in username.");
+      // Local profiles never accept arbitrary display names from onboarding or autofill.
+      const name=local ? username : label(body.name ?? username,40);
       if (await nameTaken(db,name,id)) deny(409,"Another member already uses that name.");
       if (!/^[a-z0-9_]+$/.test(username)) deny(400,"Use letters, numbers and underscores.");
       if (await one("SELECT 1 FROM users WHERE username=? OR lower(name)=?",username,username)) deny(409,"Username already taken.");
@@ -160,7 +164,9 @@ async function route(request:Request, env:Cloudflare.Env):Promise<Response> {
   if (path==="logout" && write) {
     if (sessionKey) await run("DELETE FROM sessions WHERE uid=? AND token=?",id,sessionKey);
     if (user) await run("DELETE FROM voice WHERE uid=?",id);
-    return json({signOut:signOutPath(env)},200,{"set-cookie":cookie("",0)});
+    const response=json({signOut:signOutPath(env)},200,{"set-cookie":cookie("",0)});
+    if (env.RARRCORD_AUTH==="local") response.headers.append("set-cookie",await localLogout(request,env));
+    return response;
   }
   if (!user || user.state!=="approved" || !live) deny(403,"Your RaRRcord session does not have access.");
   const account=user;
@@ -287,7 +293,7 @@ async function route(request:Request, env:Cloudflare.Env):Promise<Response> {
   }
   if (path==="transport" && !write) {
     if (request.headers.get("upgrade")?.toLowerCase()!=="websocket") return json({transport:"authenticated polling"});
-    if (request.headers.get("origin")!==url.origin) deny(403,"Invalid WebSocket origin.");
+    if (request.headers.get("origin")!==(env.RARRCORD_AUTH==="local" ? localOrigin(env) : url.origin)) deny(403,"Invalid WebSocket origin.");
     const sockets=new WebSocketPair();
     sockets[1].accept();
     sockets[1].send("RaRRcord WebSocket runtime probe");
@@ -447,7 +453,7 @@ async function route(request:Request, env:Cloudflare.Env):Promise<Response> {
   }
   if (path==="profile") {
     await throttle(path,12);
-    const name=label(body.name,40);
+    const name=env.RARRCORD_AUTH==="local" ? account.username : label(body.name,40);
     if (await nameTaken(db,name,id)) deny(409,"Another member already uses that name.");
     const status=string(body.status,10);
     if (!["online","idle","dnd","offline"].includes(status)) deny(400,"Invalid status.");
@@ -567,11 +573,13 @@ async function route(request:Request, env:Cloudflare.Env):Promise<Response> {
       if (downgrade && !await one("SELECT 1 FROM users WHERE id<>? AND role='admin' AND state='approved'",target)) deny(409,"Keep at least one active administrator.");
       commands.push(sql("UPDATE users SET state=?,role=?,epoch=epoch+1 WHERE id=? AND (role<>'admin' OR (?='approved' AND ?='admin') OR EXISTS (SELECT 1 FROM users WHERE id<>? AND role='admin' AND state='approved'))",state,role,target,state,role,target));
       commands.push(sql("DELETE FROM sessions WHERE uid=?",target),sql("DELETE FROM voice WHERE uid=?",target));
+      if (env.RARRCORD_AUTH==="local" && ["suspended","banned","deleted"].includes(state)) commands.push(sql("DELETE FROM local_sessions WHERE username=?",target.slice(6)));
       if (state==="deleted") {
         commands.push(sql("UPDATE users SET name='Deleted user', avatar=NULL,prefs='{}' WHERE id=?",target));
         if (existing.avatar) files.push(existing.avatar);
       }
     } else if (action==="revoke") {
+      if (env.RARRCORD_AUTH==="local") commands.push(sql("DELETE FROM local_sessions WHERE username=?",target.slice(6)));
       commands.push(sql("UPDATE users SET epoch=epoch+1 WHERE id=?",target),sql("DELETE FROM sessions WHERE uid=?",target),sql("DELETE FROM voice WHERE uid=?",target));
     } else if (action==="disconnect") commands.push(sql("DELETE FROM voice WHERE uid=?",target));
     else if (action==="server") {
