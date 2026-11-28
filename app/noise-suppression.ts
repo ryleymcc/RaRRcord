@@ -65,13 +65,26 @@ function binary(name: string) {
   // Each worklet gets its own copy, because posting the options can detach the buffer.
   return pending.then(buffer => buffer.slice(0));
 }
+/**
+ * Downloads the denoiser for the chosen mode ahead of time (the page calls this once it is idle),
+ * so joining a voice room does not wait for the model. Only fetches; nothing runs until a call starts.
+ */
+export function preloadVoice(prefs: Preferences) {
+  const mode = suppressionMode(prefs);
+  if (!usesModel(mode) || !workletSupported()) return;
+  const strong = mode === "strong";
+  void binary(strong ? "gtcrn.wasm" : simd() ? "rnnoise_simd.wasm" : "rnnoise.wasm").catch(() => {});
+  // Warms the HTTP cache for the worklet scripts that addModule loads.
+  for (const name of [strong ? "gtcrn-worklet.js" : "rnnoise-worklet.js", "voice-gate-worklet.js"]) void fetch(base + name).catch(() => {});
+  void fetch("/voice/speaking-meter-worklet.js").catch(() => {});
+}
 const simd = () => WebAssembly.validate(new Uint8Array([0, 97, 115, 109, 1, 0, 0, 0, 1, 5, 1, 96, 0, 1, 123, 3, 2, 1, 0, 10, 10, 1, 8, 0, 65, 0, 253, 15, 253, 98, 11]));
 
 /**
  * Builds mic → high-pass → denoiser → voice gate → stream.
  * Never throws: if anything fails it returns the raw stream and turns on the browser's suppressor instead.
  */
-export async function processVoice(raw: MediaStream, prefs: Preferences): Promise<VoiceProcessor> {
+export async function processVoice(raw: MediaStream, prefs: Preferences, prepare?: (context: AudioContext) => void): Promise<VoiceProcessor> {
   const mode = suppressionMode(prefs);
   const passthrough = (fallback?: string): VoiceProcessor => ({ stream: raw, mode, fallback, setGate() {}, close() {} });
   if (!usesModel(mode)) return passthrough();
@@ -87,6 +100,8 @@ export async function processVoice(raw: MediaStream, prefs: Preferences): Promis
       context.audioWorklet.addModule(base + (strong ? "gtcrn-worklet.js" : "rnnoise-worklet.js")),
       context.audioWorklet.addModule(base + "voice-gate-worklet.js"),
     ]);
+    // Lets the caller load its own worklets (the speaking meter) into this context alongside the models.
+    prepare?.(context);
     const source = context.createMediaStreamSource(raw);
     // Desk thumps and rumble carry no speech.
     const highpass = new BiquadFilterNode(context, { type: "highpass", frequency: 80, Q: 0.7 });

@@ -8,8 +8,8 @@ import QuickSwitcher from "./quick-switcher";
 import { isImage, typingText, uploadWithProgress } from "./upload";
 import { cleanAnnouncements, joinAnnouncement, playVoiceCue, speakAnnouncement } from "./voice-sounds";
 import { canBoost, route, setGain, type Route, loadScreenPreview, loadVolumes, maxVolume, saveScreenPreview, setVolume, streamVolumeKey } from "./user-volume";
-import { microphoneConstraints, processVoice, suppressionMode, suppressionModes, type VoiceProcessor } from "./noise-suppression";
-import { VoiceSession, codecs, type Call, type Feed, type Metrics, type Participant, type Signal } from "./rtc";
+import { microphoneConstraints, preloadVoice, processVoice, suppressionMode, suppressionModes, type VoiceProcessor } from "./noise-suppression";
+import { VoiceSession, codecs, iceServers, type Call, type Feed, type Metrics, type Participant, type Signal } from "./rtc";
 import { request, defaults, qualities, serverPictureUrl, type Channel, type Message, type Person, type Preferences, type Server } from "./ra-client";
 import Admin from "./ra-admin";
 import { DiagnosticCharts, WebRtcInternals } from "./diagnostic-charts";
@@ -464,7 +464,11 @@ export default function Community(){
   useEffect(()=>{
     if(!auth?.active)return;
     let active=true,timer:ReturnType<typeof setTimeout>;
+    let polling=false;
+    // A call that starts negotiating media wants its answer now, not on the next slow tick.
+    voice.whenBusy(()=>{if(!active||polling)return;clearTimeout(timer);timer=setTimeout(poll,0);});
     const poll=async()=>{
+      polling=true;
       const params=new URLSearchParams();
       const liveCall=voice.call;
       if(ready===chatId&&chatId&&!find&&!pinned){params.set("channel",chatId);params.set("after",String(cursor.current));}
@@ -505,12 +509,21 @@ export default function Community(){
         }
       }catch{
         if(active)void refreshAuth();
-      }finally{if(active)timer=setTimeout(poll,voice.call?750:document.hidden?4500:1500);}
+      }finally{polling=false;if(active){clearTimeout(timer);timer=setTimeout(poll,voice.call?voice.call.pollInterval():document.hidden?4500:1500);}}
     };
     void poll();
     return ()=>{active=false;clearTimeout(timer);};
   },[auth?.active,ready,chatId,find,pinned,chatChannel?.name,prefs.notifications,person?.id,person?.username,refreshAuth,report,call,voice]);
   useEffect(()=>()=>voice.disconnect(),[voice]);
+  // Once the app has loaded, fetch what joining a voice room needs (ICE servers and the denoiser model),
+  // so a click on a voice channel does not wait for them.
+  const voiceMode=space?suppressionMode(prefs):"";
+  useEffect(()=>{
+    if(!auth?.active||!voiceMode)return;
+    const start=()=>{void iceServers().catch(()=>{});preloadVoice({...defaults,suppression:voiceMode as Preferences["suppression"]});};
+    const idle=typeof requestIdleCallback==="function"?requestIdleCallback(start,{timeout:3000}):window.setTimeout(start,1500);
+    return ()=>{if(typeof cancelIdleCallback==="function")cancelIdleCallback(idle as number);else clearTimeout(idle);};
+  },[auth?.active,voiceMode]);
   const callUids=call?[...new Set(call.participants.map(p=>p.uid))].sort().join(","):"";
   useEffect(()=>{
     const state=cueState.current;
