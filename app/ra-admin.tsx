@@ -1,6 +1,8 @@
 "use client";
 import {useEffect,useState,type FormEvent} from "react";
+import {ArrowDown,ArrowUp} from "lucide-react";
 import {request,type Channel,type Person,type Server} from "./ra-client";
+import {confirmAction} from "./dialog";
 type Workspace={servers:Server[];channels:Channel[];settings:{key:string;value:string}[]};
 type State={users:(Person&{seen:number})[];channels:Channel[];logs:{id:number;name:string;action:string;detail:string;time:number}[];streams:{uid:string;name:string;room:string;cam:number;screen:number}[];roles:{server:string;name:string}[];members:{server:string;uid:string;role:string}[]};
 export default function Admin({space,server,report,refresh}:{space:Workspace;server:string;report:(text:string)=>void;refresh:()=>Promise<void>}){
@@ -11,6 +13,8 @@ export default function Admin({space,server,report,refresh}:{space:Workspace;ser
   const [channel,setChannel]=useState<Channel|null>(null);
   const [channelKind,setChannelKind]=useState("text");
   const [serverEdit,setServerEdit]=useState(false);
+  const [dropTarget,setDropTarget]=useState("");
+  const sure=async(title:string,body:string,action:string,run:()=>void)=>{if((await confirmAction({title,body,action,danger:true})).ok)run();};
   const update=()=>request<State>("admin").then(setData).catch(e=>report(e.message));
   useEffect(()=>{void update();},[]);
   async function act(input:object){
@@ -31,14 +35,16 @@ export default function Admin({space,server,report,refresh}:{space:Workspace;ser
     {!data&&<p>Loading administration…</p>}
     {tab==="Members"&&data&&<div className="settings-form">
       <div className="admin-header"><div><h3>Membership requests</h3><p>Applications remain pending until an administrator approves them.</p></div><button onClick={()=>void update()}>Refresh</button></div>
-      {data.users.filter(u=>u.state==="pending").map(u=><div className="admin-row" key={u.id}><span><strong>{u.name}</strong> @{u.username}</span><button className="primary" onClick={()=>void act({action:"account",target:u.id,state:"approved",role:"member"})}>Approve</button><button onClick={()=>void act({action:"account",target:u.id,state:"banned",role:"member"})}>Ban</button></div>)}
+      {data.users.filter(u=>u.state==="pending").map(u=><div className="admin-row" key={u.id}><span><strong>{u.name}</strong> @{u.username}</span><button className="primary" onClick={()=>void act({action:"account",target:u.id,state:"approved",role:"member"})}>Approve</button><button onClick={()=>void sure("Ban "+u.name,"They won't be able to use RaRRcord until an administrator changes their status.","Ban",()=>void act({action:"account",target:u.id,state:"banned",role:"member"}))}>Ban</button></div>)}
       {!data.users.some(u=>u.state==="pending")&&<p>No pending requests.</p>}
       <h3>Accounts</h3>
-      {data.users.filter(u=>u.state!=="pending").map(u=><form className="admin-row" key={u.id+"-"+u.state+"-"+u.role} onSubmit={e=>void act({action:"account",target:u.id,...form(e)})}>
+      {data.users.filter(u=>u.state!=="pending").map(u=><form className="admin-row" key={u.id+"-"+u.state+"-"+u.role} onSubmit={e=>{const values=form(e);const state=String(values.state);
+        if(state!==u.state&&(state==="banned"||state==="deleted"||state==="suspended"))void sure((state==="deleted"?"Delete ":state==="banned"?"Ban ":"Suspend ")+u.name,"This signs them out and blocks access until an administrator changes it back.",state==="deleted"?"Delete account":state==="banned"?"Ban":"Suspend",()=>void act({action:"account",target:u.id,...values}));
+        else void act({action:"account",target:u.id,...values});}}>
         <span><strong>{u.name}</strong><small>@{u.username} · {({online:"Online",idle:"Idle",dnd:"Do not disturb",offline:"Invisible"} as Record<string,string>)[u.status]??u.status}</small></span>
         <select aria-label={"Status for "+u.name} name="state" defaultValue={u.state}>{["approved","suspended","banned","deleted"].map(s=><option key={s} value={s}>{s[0].toUpperCase()+s.slice(1)}</option>)}</select>
         <select aria-label={"Role for "+u.name} name="role" defaultValue={u.role}><option value="member">Member</option><option value="admin">Administrator</option></select>
-        <button>Save</button><button type="button" onClick={()=>void act({action:"revoke",target:u.id})}>Revoke sessions</button>
+        <button>Save</button><button type="button" onClick={()=>void sure("Sign "+u.name+" out everywhere","Every device they're signed in on will need to sign in again.","Sign out everywhere",()=>void act({action:"revoke",target:u.id}))}>Revoke sessions</button>
       </form>)}
       <h3>Single-use invitations</h3>
       <div className="inline">{menu}<button onClick={()=>void act({action:"invite",target:targetServer})}>Create invitation</button></div>
@@ -50,14 +56,16 @@ export default function Admin({space,server,report,refresh}:{space:Workspace;ser
         <label>Server name<input name="name" required maxLength={60} defaultValue={serverEdit?active?.name:""}/></label><label>Server icon<input name="icon" maxLength={4} defaultValue={serverEdit?active?.icon:""}/></label>
         <button className="primary">{serverEdit?"Rename server":"Create server"}</button>
         <button type="button" onClick={()=>setServerEdit(!serverEdit)}>{serverEdit?"Create new":"Edit selected"}</button>
-        {serverEdit&&active&&<button type="button" className="danger" onClick={()=>{if(confirm("Delete this server and remove access to its channels?"))void act({action:"server_delete",target:targetServer});}}>Delete server</button>}
+        {serverEdit&&active&&<button type="button" className="danger" onClick={()=>void sure("Delete "+(active?.name??"server"),"This deletes the server and removes access to its channels. It can't be undone.","Delete server",()=>void act({action:"server_delete",target:targetServer}))}>Delete server</button>}
       </form>
       <h3>Channels</h3><p>Drag a channel onto another row to move it to that position.</p>
-      <div>{channels.map(c=><div className="admin-row" draggable key={c.id} onDragStart={e=>e.dataTransfer.setData("text/plain",c.id)} onDragOver={e=>e.preventDefault()} onDrop={e=>{
-        e.preventDefault();
+      <div>{channels.map((c,i)=><div className={"admin-row"+(dropTarget===c.id?" drop-target":"")} draggable key={c.id} onDragStart={e=>e.dataTransfer.setData("text/plain",c.id)} onDragOver={e=>{e.preventDefault();setDropTarget(c.id);}} onDragLeave={()=>setDropTarget(t=>t===c.id?"":t)} onDragEnd={()=>setDropTarget("")} onDrop={e=>{
+        e.preventDefault();setDropTarget("");
         const source=channels.find(x=>x.id===e.dataTransfer.getData("text/plain"));
         if(source&&source.id!==c.id)void act({action:"order",target:source.id,destination:c.id,server:targetServer});
-      }}><span>{c.name}<small>{c.kind} · {c.category||"Channels"}</small></span><button onClick={()=>{setChannel(c);setChannelKind(c.kind);}}>Edit</button><button className="danger" onClick={()=>{if(confirm("Delete this channel and remove access to its history?"))void act({action:"channel_delete",target:c.id});}}>Delete</button></div>)}</div>
+      }}><span>{c.name}<small>{c.kind} · {c.category||"Channels"}</small></span>
+        <span className="order"><button type="button" aria-label={"Move "+c.name+" up"} title="Move up" disabled={i===0} onClick={()=>void act({action:"order",target:c.id,destination:channels[i-1].id,server:targetServer})}><ArrowUp size={15}/></button><button type="button" aria-label={"Move "+c.name+" down"} title="Move down" disabled={i===channels.length-1} onClick={()=>void act({action:"order",target:c.id,destination:channels[i+1].id,server:targetServer})}><ArrowDown size={15}/></button></span>
+        <button onClick={()=>{setChannel(c);setChannelKind(c.kind);}}>Edit</button><button className="danger" onClick={()=>void sure("Delete #"+c.name,"This deletes the channel and its message history. It can't be undone.","Delete channel",()=>void act({action:"channel_delete",target:c.id}))}>Delete</button></div>)}</div>
       {channel&&<button onClick={()=>{setChannel(null);setChannelKind("text");}}>New channel</button>}
       <form className="settings-form" key={channel?.id??"new"} onSubmit={e=>{
         const fd=new FormData(e.currentTarget);e.preventDefault();
@@ -78,7 +86,7 @@ export default function Admin({space,server,report,refresh}:{space:Workspace;ser
       <form className="inline" onSubmit={e=>void act({action:"member",server:targetServer,...form(e)})}>
         <label>Account<select name="target" required>{data?.users.filter(u=>u.state==="approved").map(u=><option key={u.id} value={u.id}>{u.name}</option>)}</select></label>
         <label>Role<select name="role">{roles.map(r=><option key={r}>{r}</option>)}</select></label><button>Add or assign role</button>
-        <button type="button" onClick={e=>{const f=e.currentTarget.form;if(f&&confirm("Remove this account from this server?"))void act({action:"member",server:targetServer,...Object.fromEntries(new FormData(f)),remove:true});}}>Remove membership</button>
+        <button type="button" onClick={e=>{const f=e.currentTarget.form;if(f)void sure("Remove from server","This removes the account from this server and its channels.","Remove membership",()=>void act({action:"member",server:targetServer,...Object.fromEntries(new FormData(f)),remove:true}));}}>Remove membership</button>
       </form>
     </div>}
     {tab==="Activity"&&data&&<div className="settings-form">

@@ -1,6 +1,10 @@
 "use client";
 import { Fragment,memo,useCallback,useEffect,useLayoutEffect,useRef,useState, type ClipboardEvent, type FormEvent, type ReactNode } from "react";
-import { AudioLines, Camera, ChevronDown, CircleHelp, Headphones, Hash, LockKeyhole, LogOut, Menu, MessageSquare, Mic, MicOff, MonitorUp, Paperclip, Pin, Plus, Search, Send, Settings, Shield, Smile, Users, Video, X } from "lucide-react";
+import { AudioLines, Camera, ChevronDown, CircleHelp, Copy, CornerUpLeft, Ellipsis, Flag, Headphones, Hash, LockKeyhole, LogOut, Menu, MessageSquare, Mic, MicOff, MonitorUp, Paperclip, Pencil, Pin, Plus, Reply, Search, Send, Settings, Shield, Smile, SmilePlus, Trash2, Users, Video, X } from "lucide-react";
+import { ConfirmHost, Modal, confirmAction } from "./dialog";
+import { friendlyError } from "./friendly-error";
+import { useMedia } from "./use-media";
+import QuickSwitcher from "./quick-switcher";
 import { playVoiceCue } from "./voice-sounds";
 import { microphoneConstraints, processVoice, suppressionMode, suppressionModes, type VoiceProcessor } from "./noise-suppression";
 import { VoiceSession, codecs, type Call, type Feed, type Metrics, type Participant, type Signal } from "./rtc";
@@ -32,31 +36,48 @@ function VoiceMembers({members}:{members:VoiceMember[]}){
     <Avatar name={m.name} uid={m.uid} has={m.avatar}/><span>{m.name}</span>{m.cam&&<Video size={13} aria-label="Camera on"/>}{m.live&&<b className="live-tag">LIVE</b>}
   </li>)}</ul>;
 }
-type RowActions={action:(kind:string,m:Message,extra?:object)=>Promise<void>;reply:(m:Message)=>void;pick:(m:Message)=>void;edit:(m:Message)=>void};
-// A row only re-renders when its message, its neighbour or the viewer changes, not on every poll.
-const MessageRow=memo(function MessageRow({m,previous,replyName,me,admin,actions}:{m:Message;previous?:Message;replyName?:string;me?:string;admin:boolean;actions:RowActions}){
+type RowActions={action:(kind:string,m:Message,extra?:object)=>Promise<void>;reply:(m:Message)=>void;pick:(m:Message)=>void;edit:(m:Message)=>void;menu:(id:number|null)=>void;jump:(id:number)=>void;remove:(m:Message)=>void;report:(m:Message)=>void};
+const snippet=(text:string)=>text.replace(/\x60\x60\x60[\s\S]*?(\x60\x60\x60|$)/g,"[code]").replace(/\s+/g," ").trim().slice(0,120);
+// A row only re-renders when its message, its neighbour, its menu or the viewer changes, not on every poll.
+const MessageRow=memo(function MessageRow({m,previous,replyTo,me,admin,menuOpen,actions}:{m:Message;previous?:Message;replyTo?:Message;me?:string;admin:boolean;menuOpen:boolean;actions:RowActions}){
   const newDay=!previous||day(previous.created)!==day(m.created);
-  const joined=!!previous&&!newDay&&previous.uid===m.uid&&m.created-previous.created<240000;
+  const joined=!m.reply&&!!previous&&!newDay&&previous.uid===m.uid&&m.created-previous.created<240000;
   const reacts=Object.entries(m.reactions?JSON.parse(m.reactions) as Record<string,number>:{});
   const mine=new Set<string>(m.my_reactions?JSON.parse(m.my_reactions):[]);
+  const press=useRef<ReturnType<typeof setTimeout>|undefined>(undefined);
+  const mineMessage=me===m.uid;
+  const close=()=>actions.menu(null);
   return <div className="message-row" style={{containIntrinsicSize:joined?"auto 28px":"auto 72px"}}>
     {newDay&&<div className="date-divider"><span>{day(m.created)}</span></div>}
-    <article className={"message "+(joined?"joined":"")} aria-label={"Message by "+m.name}>
+    <article id={"msg-"+m.id} className={"message "+(joined?"joined":"")+(menuOpen?" menu-open":"")} aria-label={"Message by "+m.name}
+      onContextMenu={event=>{if((event.target as HTMLElement).closest("a,img,pre,code"))return;event.preventDefault();actions.menu(m.id);}}
+      onPointerDown={event=>{if(event.pointerType!=="touch")return;press.current=setTimeout(()=>actions.menu(m.id),450);}}
+      onPointerUp={()=>clearTimeout(press.current)} onPointerMove={()=>clearTimeout(press.current)} onPointerCancel={()=>clearTimeout(press.current)}>
+      {m.reply?<button type="button" className="reply-preview" onClick={()=>actions.jump(m.reply!)} disabled={!replyTo}>
+        <CornerUpLeft size={13}/>{replyTo?<><Avatar name={replyTo.name} uid={replyTo.uid} has={replyTo.has_avatar}/><b title={"@"+replyTo.username}>{replyTo.name}</b><span>{replyTo.body?snippet(replyTo.body):replyTo.filename??"Attachment"}</span></>:<span>Replying to an earlier message</span>}
+      </button>:null}
       {!joined&&<Avatar name={m.name} uid={m.uid} has={m.has_avatar}/>}
       <div className="message-content">
-        {m.reply&&<span className="reply-label">Replying to {replyName??"an earlier message"}</span>}
-        {!joined&&<div className="byline"><strong>{m.name}</strong><time dateTime={new Date(m.created).toISOString()}>{clock(m.created)}</time>{!!m.edited&&<span className="edited">(edited)</span>}{!!m.pinned&&<span className="tag">Pinned</span>}</div>}
+        {!joined&&<div className="byline"><strong title={"@"+m.username}>{m.name}</strong><time dateTime={new Date(m.created).toISOString()} title={new Date(m.created).toLocaleString()}>{clock(m.created)}</time>{!!m.edited&&<span className="edited">(edited)</span>}{!!m.pinned&&<span className="tag">Pinned</span>}<span className="handle">@{m.username}</span></div>}
         {m.body&&<div className="text-body">{markdown(m.body)}{!!m.edited&&joined&&<small> (edited)</small>}</div>}
         {m.attachment&&<Attachment message={m}/>}
-        {reacts.length>0&&<div className="reaction-row">{reacts.map(([emoji,count])=><button key={emoji} type="button" aria-pressed={mine.has(emoji)} onClick={()=>void actions.action("react",m,{emoji,remove:mine.has(emoji)})}>{emoji} {count}</button>)}</div>}
+        {reacts.length>0&&<div className="reaction-row">{reacts.map(([emoji,count])=><button key={emoji} type="button" aria-pressed={mine.has(emoji)} aria-label={emoji+" "+count+(mine.has(emoji)?", you reacted":"")} onClick={()=>void actions.action("react",m,{emoji,remove:mine.has(emoji)})}>{emoji} {count}</button>)}</div>}
       </div>
-      <details className="message-menu"><summary aria-label="Message actions">•••</summary><div>
-        <button onClick={()=>actions.reply(m)}>Reply</button>
-        <button onClick={event=>{event.currentTarget.closest("details")?.removeAttribute("open");actions.pick(m);}}>Add reaction</button>
-        {me===m.uid&&m.body&&<button onClick={()=>actions.edit(m)}>Edit</button>}
-        {(me===m.uid||admin)&&<><button onClick={()=>void actions.action("pin",m)}>{m.pinned?"Unpin":"Pin"}</button><button className="danger" onClick={()=>{if(confirm("Delete this message?"))void actions.action("delete",m);}}>Delete</button></>}
-        {me!==m.uid&&<button onClick={()=>{const reason=prompt("Why are you reporting this message?");if(reason)void actions.action("report",m,{reason});}}>Report</button>}
-      </div></details>
+      <div className="message-tools" role="toolbar" aria-label="Message actions">
+        <button type="button" aria-label="Add reaction" title="Add reaction" onClick={()=>actions.pick(m)}><SmilePlus size={17}/></button>
+        <button type="button" aria-label="Reply" title="Reply" onClick={()=>actions.reply(m)}><Reply size={17}/></button>
+        {mineMessage&&m.body&&<button type="button" aria-label="Edit" title="Edit" onClick={()=>actions.edit(m)}><Pencil size={16}/></button>}
+        <button type="button" aria-label="More actions" title="More" aria-haspopup="menu" aria-expanded={menuOpen} onClick={()=>actions.menu(menuOpen?null:m.id)}><Ellipsis size={17}/></button>
+      </div>
+      {menuOpen&&<div className="message-menu" role="menu" aria-label={"Actions for message by "+m.name} onKeyDown={event=>{if(event.key==="Escape"){event.stopPropagation();close();}}}>
+        <button role="menuitem" autoFocus onClick={()=>{close();actions.pick(m);}}><SmilePlus size={16}/>Add reaction</button>
+        <button role="menuitem" onClick={()=>{close();actions.reply(m);}}><Reply size={16}/>Reply</button>
+        {mineMessage&&m.body&&<button role="menuitem" onClick={()=>{close();actions.edit(m);}}><Pencil size={16}/>Edit message</button>}
+        {m.body&&<button role="menuitem" onClick={()=>{close();void navigator.clipboard?.writeText(m.body).catch(()=>{});}}><Copy size={16}/>Copy text</button>}
+        {(mineMessage||admin)&&<button role="menuitem" onClick={()=>{close();void actions.action("pin",m);}}><Pin size={16}/>{m.pinned?"Unpin":"Pin"}</button>}
+        {!mineMessage&&<button role="menuitem" onClick={()=>{close();actions.report(m);}}><Flag size={16}/>Report</button>}
+        {(mineMessage||admin)&&<button role="menuitem" className="danger" onClick={()=>{close();actions.remove(m);}}><Trash2 size={16}/>Delete message</button>}
+      </div>}
     </article>
   </div>;
 });
@@ -92,7 +113,7 @@ function Media({feed,deaf,output,volume,video}:{feed:Feed;deaf:boolean;output:st
   },[feed.stream,output,volume]);
   return video?<video autoPlay playsInline controls muted={deaf} ref={node=>{element.current=node;}}/>:<audio autoPlay muted={deaf} ref={node=>{element.current=node;}}/>;
 }
-function Diagnostics({call,latency}:{call:Call|null;latency:number|null}){
+function Diagnostics({call,latency,errors}:{call:Call|null;latency:number|null;errors:{time:number;text:string}[]}){
   const [telemetry,setTelemetry]=useState<{call:Call;records:Metrics[];samples:DiagnosticSample[]}>();
   const records=telemetry?.call===call?telemetry.records:[];
   const samples=telemetry?.call===call?telemetry.samples:[];
@@ -146,6 +167,7 @@ function Diagnostics({call,latency}:{call:Call|null;latency:number|null}){
       ["Packet loss",value(r.loss,"%")],["Jitter",value(r.jitter," ms")],["Frames dropped",value(r.dropped)],["Frames encoded",value(r.encoded)],["Frames decoded",value(r.decoded)],
       ["Encode time per frame",value(r.encodeMs," ms")],["Decode time per frame",value(r.decodeMs," ms")],["Available outgoing",value(r.available," Kbps")],["Quality limit",r.limited??"Unavailable"],
     ].map(([label,n])=><div key={label}><dt>{label}</dt><dd>{n}</dd></div>)}</dl></div>)}
+    {errors.length>0&&<details className="metric-card"><summary>Recent errors ({errors.length})</summary><ul className="error-log">{errors.map(e=><li key={e.time+e.text}><time>{new Date(e.time).toLocaleTimeString()}</time> {e.text}</li>)}</ul></details>}
     <p>A relay requires configured TURN credentials. If peers stay disconnected, try a different network or ask an administrator to check relay configuration.</p>
   </div>;
 }
@@ -255,8 +277,14 @@ export default function Community(){
   const modalRef=useRef(modal);
   useEffect(()=>{modalRef.current=modal;},[modal]);
   const [toast,setToast]=useState("");
-  const [members,setMembers]=useState(true);
+  const wide=useMedia("(min-width: 861px)");
+  const [membersPref,setMembersPref]=useState(true);
+  const [membersSheet,setMembersSheet]=useState(false);
+  // Wide screens keep the member list docked; narrow screens open it as a panel over the chat.
+  const members=wide?membersPref:membersSheet;
   const [mobile,setMobile]=useState(false);
+  const [menu,setMenu]=useState<number|null>(null);
+  const [errors,setErrors]=useState<{time:number;text:string}[]>([]);
   const [call,setCall]=useState<Call|null>(null);
   const [latency,setLatency]=useState<number|null>(null);
   const [,refreshCall]=useState(0);
@@ -276,12 +304,16 @@ export default function Community(){
   const cursor=useRef(0);
   const lastTyping=useRef(0);
   const stick=useRef(true);
-  const rowHandlers=useRef<RowActions>(null as unknown as RowActions);
+  const rowHandlers=useRef<Omit<RowActions,"menu">>(null as unknown as Omit<RowActions,"menu">);
   const [rowActions]=useState<RowActions>(()=>({
     action:(kind,m,extra)=>rowHandlers.current.action(kind,m,extra),
     reply:m=>rowHandlers.current.reply(m),
     pick:m=>rowHandlers.current.pick(m),
     edit:m=>rowHandlers.current.edit(m),
+    menu:id=>setMenu(id),
+    jump:id=>rowHandlers.current.jump(id),
+    remove:m=>rowHandlers.current.remove(m),
+    report:m=>rowHandlers.current.report(m),
   }));
   const person=auth?.user;
   const channel=space?.channels.find(c=>c.id===selected);
@@ -295,7 +327,11 @@ export default function Community(){
   const setDraft=(text:string)=>setDrafts(previous=>({...previous,[chatId]:text}));
   const prefs={...defaults,...space?.prefs};
   const limit=Number(space?.settings.find(v=>v.key==="bitrate")?.value??0);
-  const report=useCallback((message:string)=>setToast(message),[]);
+  const report=useCallback((message:string)=>{
+    const text=friendlyError(message);
+    if(text!==message)setErrors(list=>[...list.slice(-19),{time:Date.now(),text:message}]);
+    setToast(text);
+  },[]);
   const [voice]=useState(()=>new VoiceSession(setCall,()=>refreshCall(n=>n+1),report));
   const refreshAuth=useCallback(()=>request<Auth>("session").then(setAuth).catch(e=>setToast(e.message)),[]);
   const refresh=useCallback(()=>request<Workspace>("workspace").then(setSpace),[]);
@@ -404,6 +440,21 @@ export default function Community(){
     if(last && chatId && ready===chatId && !find && !pinned && !document.hidden)void request("read",{channel:chatId,id:last.id}).catch(()=>{});
   },[messages,chatId,ready,find,pinned]);
   useEffect(()=>{if(!toast)return;const timer=setTimeout(()=>setToast(""),6500);return ()=>clearTimeout(timer);},[toast]);
+  useEffect(()=>{
+    if(menu===null)return;
+    const away=(event:PointerEvent)=>{if(!(event.target as HTMLElement).closest(".message-menu,.message-tools"))setMenu(null);};
+    const key=(event:KeyboardEvent)=>{if(event.key==="Escape")setMenu(null);};
+    document.addEventListener("pointerdown",away);document.addEventListener("keydown",key);
+    return ()=>{document.removeEventListener("pointerdown",away);document.removeEventListener("keydown",key);};
+  },[menu]);
+  useEffect(()=>{
+    const key=(event:KeyboardEvent)=>{
+      if((event.ctrlKey||event.metaKey)&&event.key.toLowerCase()==="k"){event.preventDefault();setModal(m=>m==="switch"?"":"switch");}
+      else if(event.key==="Escape"&&!document.querySelector("dialog[open]")){setMobile(false);setMembersSheet(false);}
+    };
+    document.addEventListener("keydown",key);
+    return ()=>document.removeEventListener("keydown",key);
+  },[]);
   function choose(c:Channel){
     setMobile(false);setFind("");setPinned(false);setSelected(c.id);
     if(c.kind==="voice"){setStage(true);void join(c);}
@@ -453,7 +504,21 @@ export default function Community(){
       action,
       reply:m=>{setReply(m);draftInput.current?.focus();},
       pick:m=>setPicker(m),
-      edit:m=>{setPicker(null);setEdit(m);setDraft(m.body);draftInput.current?.focus();},
+      edit:m=>{setPicker(null);setReply(null);setEdit(m);setDraft(m.body);draftInput.current?.focus();},
+      jump:id=>{
+        const target=document.getElementById("msg-"+id);
+        if(!target){report("That message is further back than what's loaded. Use Load earlier messages to find it.");return;}
+        target.scrollIntoView({block:"center",behavior:matchMedia("(prefers-reduced-motion: reduce)").matches?"auto":"smooth"});
+        target.classList.remove("flash");void target.offsetWidth;target.classList.add("flash");
+      },
+      remove:async m=>{
+        const answer=await confirmAction({title:"Delete message",body:"This removes the message for everyone. It can't be undone.",action:"Delete message",danger:true});
+        if(answer.ok)void action("delete",m);
+      },
+      report:async m=>{
+        const answer=await confirmAction({title:"Report message",body:"Administrators will see this message and your reason.",action:"Send report",reason:"Why are you reporting it?"});
+        if(answer.ok&&answer.reason)void action("report",m,{reason:answer.reason});
+      },
     };
   });
   function changeDraft(text:string){
@@ -523,7 +588,8 @@ export default function Community(){
   const orderedFeeds=speaker?[...feeds].sort((a,b)=>Number(call?.speaking(b.peer))-Number(call?.speaking(a.peer))):feeds;
   const ownVoice=call?.local.get("cam");
   const bounded=ready===chatId?messages.slice(-350):[];
-  const names=new Map(bounded.map(m=>[m.id,m.name]));
+  const byId=new Map(bounded.map(m=>[m.id,m]));
+  const sheetOpen=mobile||(!wide&&membersSheet);
   return <div className={"assembly "+(members?"with-members ":"")+(mobile?"mobile-nav ":"")+(prefs.compact?"compact":"")}>
     <nav className="rail" aria-label="Servers">
       <button className="mark" aria-label="RaRRcord home" onClick={()=>{const home=space?.servers[0]?.id??"community";setServer(home);setSelected(space?.channels.find(c=>c.server===home&&c.kind==="text")?.id??"");setStage(false);}}>R</button>
@@ -552,14 +618,14 @@ export default function Community(){
     </aside>
     <main className="conversation">
       <header className="topbar">
-        <span className="mobile-toggle"><IconButton label="Toggle navigation" onClick={()=>setMobile(!mobile)}><Menu size={20}/></IconButton></span>
+        <span className="mobile-toggle"><IconButton label="Toggle navigation" active={mobile} onClick={()=>{setMembersSheet(false);setMobile(!mobile);}}><Menu size={20}/></IconButton></span>
         <div className="location-title">{mainStage?<AudioLines size={21}/>:<Hash size={22}/>}<h1>{mainStage?callTitle??channel?.name??"Voice room":channel?.name??"Community"}</h1></div>
         <span className="channel-description">{channel?.description}</span>
         <div className="top-actions">
           {call&&!mainStage&&<button className="subtle" onClick={()=>{setFind("");setPinned(false);setStage(true);}}>View call</button>}
           {mainStage&&voiceRoom&&<button type="button" className={"sidechat-toggle"+(sidechatOpen?" active":"")} aria-expanded={sidechatOpen} aria-controls={sidechatOpen?"voice-sidechat":undefined} onClick={()=>setSidechat(sidechatOpen?"":voiceRoom.id)}><MessageSquare size={17}/><span>Sidechat</span>{!sidechatOpen&&voiceRoom.unread>0&&<b className="badge">{Math.min(voiceRoom.unread,99)}{voiceRoom.unread>99?"+":""}</b>}</button>}
           {!mainStage&&<><label className="search"><Search size={16}/><input aria-label="Search messages" value={find} placeholder="Search messages" onChange={e=>setFind(e.target.value)}/></label><IconButton label="Pinned messages" active={pinned} onClick={()=>setPinned(!pinned)}><Pin size={19}/></IconButton></>}
-          <IconButton label="Toggle member list" active={members} onClick={()=>setMembers(!members)}><Users size={20}/></IconButton>
+          <IconButton label="Toggle member list" active={members} onClick={()=>{if(wide)setMembersPref(!membersPref);else{setMobile(false);setMembersSheet(!membersSheet);}}}><Users size={20}/></IconButton>
           {person?.role==="admin"&&<IconButton label="Administration" onClick={()=>setModal("admin")}><Shield size={19}/></IconButton>}
         </div>
       </header>
@@ -586,8 +652,8 @@ export default function Community(){
         <div className="message-feed" data-channel={chatId} ref={feed} onScroll={e=>{const el=e.currentTarget;stick.current=el.scrollHeight-el.scrollTop-el.clientHeight<100;}}>
           {hasMore&&bounded.length>=50&&<button className="older" onClick={earlier}>Load earlier messages</button>}
           {!bounded.length&&<div className="blank"><span className="empty-icon">{sidechatOpen?<MessageSquare size={26}/>:<Hash size={26}/>}</span><h2>{chatId&&ready!==chatId?"Loading messages…":find?"No matching messages":pinned?"No pinned messages":chatChannel?.name??"Welcome to RaRRcord"}</h2>{(!chatId||ready===chatId)&&<p>{find?"Try another search.":pinned?"Pinned messages will appear here.":chatChannel?"Start the conversation.":"Choose a channel to get started."}</p>}</div>}
-          {bounded.map((m,i)=><MessageRow key={m.id} m={m} previous={bounded[i-1]} replyName={m.reply?names.get(m.reply):undefined}
-            me={person?.id} admin={person?.role==="admin"} actions={rowActions}/>)}
+          {bounded.map((m,i)=><MessageRow key={m.id} m={m} previous={bounded[i-1]} replyTo={m.reply?byId.get(m.reply):undefined}
+            me={person?.id} admin={person?.role==="admin"} menuOpen={menu===m.id} actions={rowActions}/>)}
         </div>
         {chatChannel&&<div className="compose-area">
           {picker==="emoji"&&<EmojiPicker label="Insert emoji" select={insertEmoji} close={()=>{setPicker(null);draftInput.current?.focus();}}/>}
@@ -613,7 +679,12 @@ export default function Community(){
               const file=event.currentTarget.files?.[0];event.currentTarget.value="";if(file)selectGif(file);
             }}/>
             <IconButton label="Attach file" onClick={()=>upload.current?.click()}><Paperclip size={20}/></IconButton>
-            <textarea ref={draftInput} rows={1} maxLength={8000} value={draft} placeholder={"Message "+chatChannel.name} aria-label={"Message "+chatChannel.name} onChange={event=>changeDraft(event.target.value)} onPaste={pasteGif} onKeyDown={e=>{if(e.key==="Enter"&&!e.shiftKey&&!e.nativeEvent.isComposing){e.preventDefault();e.currentTarget.form?.requestSubmit();}}}/>
+            <textarea ref={draftInput} rows={1} maxLength={8000} value={draft} placeholder={"Message "+chatChannel.name} aria-label={"Message "+chatChannel.name} onChange={event=>changeDraft(event.target.value)} onPaste={pasteGif} onKeyDown={e=>{
+              if(e.nativeEvent.isComposing)return;
+              if(e.key==="Enter"&&!e.shiftKey){e.preventDefault();e.currentTarget.form?.requestSubmit();}
+              else if(e.key==="Escape"&&(edit||reply)&&!picker){e.preventDefault();if(edit)setDraft("");setEdit(null);setReply(null);}
+              else if(e.key==="ArrowUp"&&!draft&&!edit){const last=[...bounded].reverse().find(m=>m.uid===person?.id&&m.body);if(last){e.preventDefault();rowHandlers.current.edit(last);}}
+            }}/>
             <IconButton label="Insert emoji" active={picker==="emoji"} onClick={()=>setPicker(picker==="emoji"?null:"emoji")}><Smile size={20}/></IconButton>
             <button type="button" className={"icon-button gif-button"+(picker==="gif"?" active":"")} aria-label="Add GIF" aria-expanded={picker==="gif"} disabled={!!edit} onClick={()=>setPicker(picker==="gif"?null:"gif")}>GIF</button>
             <button className="send" aria-label="Send message" disabled={sending||(!draft.trim()&&(!gif||!!edit))}><Send size={17}/></button>
@@ -625,21 +696,28 @@ export default function Community(){
       {call?.feeds.filter(f=>f.kind==="voice").map(f=><Media key={f.key} feed={f} deaf={call.deaf} output={prefs.output} video={false} volume={volumes[f.peer]??1}/>)}
     </main>
     {members&&<aside className="members-pane"><div className="members-title"><h2>Members</h2><span>{space?.people.length??0}</span></div>
-      {["online","offline"].map(group=><section key={group}><h3>{group==="online"?"Available":"Offline"}</h3>{space?.people.filter(p=>group==="offline"?p.status==="offline":p.status!=="offline").map(p=><details className="member" key={p.id}><summary><Avatar name={p.name} uid={p.id} has={p.avatar} status={p.status}/><span><b>{p.name}</b><small>{p.role==="admin"?"Administrator":"@"+p.username}</small></span></summary>
+      {["online","offline"].map(group=><section key={group}><h3>{group==="online"?"Available":"Offline"}</h3>{space?.people.filter(p=>group==="offline"?p.status==="offline":p.status!=="offline").map(p=><details className="member" key={p.id}><summary><Avatar name={p.name} uid={p.id} has={p.avatar} status={p.status}/><span><b>{p.name}</b><small>@{p.username}{p.role==="admin"?" · Admin":""}</small></span></summary>
         {p.id!==person?.id&&<div className="member-menu"><button onClick={()=>{setDmUsers([p.id]);setModal("dm");}}>Message</button><button onClick={async()=>{try{await request("block",{users:[p.id]});report("Member blocked.");}catch(e){report((e as Error).message);}}}>Block</button><button onClick={()=>void request("block",{users:[p.id],remove:true}).then(()=>report("Member unblocked.")).catch(e=>report(e.message))}>Unblock</button></div>}
       </details>)}</section>)}
     </aside>}
-    {toast&&<div role="status" className="toast">{toast}<IconButton label="Dismiss" onClick={()=>setToast("")}><X size={16}/></IconButton></div>}
-    {modal&&<div className="overlay" onClick={e=>{if(e.target===e.currentTarget)setModal("");}}><section role="dialog" aria-modal="true" aria-labelledby="modal-title" className={"dialog "+(modal==="admin"?"wide":"")}><header><h2 id="modal-title">{{admin:"Administration",settings:"User settings",diagnostics:"Connection diagnostics",dm:"Direct message",help:"RaRRcord help"}[modal]}</h2><IconButton label="Close dialog" onClick={()=>setModal("")}><X size={20}/></IconButton></header>
+    {sheetOpen&&<div className="scrim" aria-hidden="true" onClick={()=>{setMobile(false);setMembersSheet(false);}}/>}
+    <div className="toast-region" role="status" aria-live="polite">{toast&&<div className="toast">{toast}<IconButton label="Dismiss" onClick={()=>setToast("")}><X size={16}/></IconButton></div>}</div>
+    <ConfirmHost/>
+    {modal&&<Modal key={modal} wide={modal==="admin"} className={modal==="switch"?"switch-dialog":""} onClose={()=>setModal("")} title={({admin:"Administration",settings:"User settings",diagnostics:"Connection diagnostics",dm:"Direct message",help:"RaRRcord help",switch:"Jump to"} as Record<string,string>)[modal]}>
       {modal==="settings"&&person&&<><UserSettings person={person} prefs={prefs} limit={limit} save={()=>{void refresh();void refreshAuth();setModal("");report(call?"Settings saved. Rejoin the call to apply media changes.":"Settings saved.");}} report={report}/><button className="signout" onClick={logout}>Sign out</button></>}
-      {modal==="diagnostics"&&<Diagnostics call={call} latency={latency}/>}
+      {modal==="diagnostics"&&<Diagnostics call={call} latency={latency} errors={errors}/>}
       {modal==="admin"&&space&&<Admin space={space} server={server} report={report} refresh={refresh}/>}
       {modal==="dm"&&<form className="settings-form" onSubmit={async e=>{e.preventDefault();try{const result=await request<{id:string}>("dm",{users:dmUsers});await refresh();setSelected(result.id);setStage(false);setModal("");}catch(e){report((e as Error).message);}}}>
         {space?.people.filter(p=>p.id!==person?.id).map(p=><label className="inline" key={p.id}><input type="checkbox" checked={dmUsers.includes(p.id)} onChange={e=>setDmUsers(prev=>e.target.checked?[...prev,p.id]:prev.filter(id=>id!==p.id))}/>{p.name}</label>)}
         <button className="primary" disabled={!dmUsers.length}>Open conversation</button>
       </form>}
-      {modal==="help"&&<div className="settings-form"><p>Select a text channel to send messages or a voice room to connect. Joining a voice room starts your microphone with your browser’s permission. Use the call controls for your microphone, camera and screen.</p><p>Use Shift + Enter for a new line. Open User settings to configure capture and push to talk.</p><a href="/privacy">Privacy</a></div>}
-    </section></div>}
+      {modal==="help"&&<div className="settings-form"><p>Select a text channel to send messages or a voice room to connect. Joining a voice room starts your microphone with your browser’s permission. Use the call controls for your microphone, camera and screen.</p><p>Use Shift + Enter for a new line. Open User settings to configure capture and push to talk.</p>
+        <dl className="shortcuts"><dt><kbd>Ctrl</kbd> <kbd>K</kbd></dt><dd>Jump to a channel or person</dd><dt><kbd>↑</kbd></dt><dd>Edit your last message (empty message box)</dd><dt><kbd>Esc</kbd></dt><dd>Cancel a reply or edit, close menus and dialogs</dd><dt>Right-click or long-press</dt><dd>Message actions</dd></dl>
+        <a href="/privacy">Privacy</a></div>}
+      {modal==="switch"&&space&&<QuickSwitcher channels={space.channels} servers={space.servers} people={space.people} me={person?.id}
+        openChannel={c=>{setModal("");if(c.server)setServer(c.server);choose(c);}}
+        openPerson={async p=>{setModal("");try{const result=await request<{id:string}>("dm",{users:[p.id]});await refresh();setSelected(result.id);setStage(false);}catch(e){report((e as Error).message);}}}/>}
+    </Modal>}
   </div>;
 }
 function GifPreview({file,remove}:{file:File;remove:()=>void}){
