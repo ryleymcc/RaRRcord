@@ -7,7 +7,7 @@ import { useMedia } from "./use-media";
 import QuickSwitcher from "./quick-switcher";
 import { isImage, typingText, uploadWithProgress } from "./upload";
 import { playVoiceCue } from "./voice-sounds";
-import { boost, canBoost, loadScreenPreview, loadVolumes, maxVolume, saveScreenPreview, setVolume, streamVolumeKey } from "./user-volume";
+import { canBoost, route, setGain, type Route, loadScreenPreview, loadVolumes, maxVolume, saveScreenPreview, setVolume, streamVolumeKey } from "./user-volume";
 import { microphoneConstraints, processVoice, suppressionMode, suppressionModes, type VoiceProcessor } from "./noise-suppression";
 import { VoiceSession, codecs, type Call, type Feed, type Metrics, type Participant, type Signal } from "./rtc";
 import { request, defaults, qualities, type Channel, type Message, type Person, type Preferences, type Server } from "./ra-client";
@@ -107,17 +107,36 @@ function markdown(text:string){
 }
 function Media({feed,deaf,output,volume,video}:{feed:Feed;deaf:boolean;output:string;volume:number;video:boolean}){
   const element=useRef<HTMLMediaElement|null>(null);
+  const routed=useRef<Route|null>(null);
+  const level=useRef(volume);
+  const [ready,setReady]=useState(0);
+  // Attach the stream only when it changes: reassigning srcObject restarts playback on every slider move.
   useEffect(()=>{
     const el=element.current;
     if(!el)return;
     el.srcObject=feed.stream;
-    // Above 100% the element stays muted (Chrome still needs it playing to decode remote audio) and a gain node plays it louder.
-    const release=!deaf&&volume>1?boost(feed.stream,volume,output):null;
-    el.muted=deaf||!!release; el.volume=Math.min(1,volume);
-    if(output && "setSinkId" in el)void (el as HTMLMediaElement & {setSinkId(id:string):Promise<void>}).setSinkId(output).catch(()=>{});
     void el.play().catch(()=>{});
-    return ()=>release?.();
-  },[feed.stream,output,volume,deaf]);
+  },[feed.stream]);
+  useEffect(()=>{
+    const el=element.current;
+    if(output && el && "setSinkId" in el)void (el as HTMLMediaElement & {setSinkId(id:string):Promise<void>}).setSinkId(output).catch(()=>{});
+  },[output]);
+  // Hearing someone goes through a gain node (see user-volume.ts); the element only plays it itself where Web Audio can't.
+  useEffect(()=>{
+    const el=element.current;
+    if(!el)return;
+    const r=deaf?null:route(feed.stream,output,()=>setReady(n=>n+1));
+    routed.current=r;
+    if(r)setGain(r,level.current);
+    el.muted=deaf||!!r; el.volume=r?1:Math.min(1,level.current);
+    return ()=>{r?.release();routed.current=null;};
+  },[feed.stream,output,deaf,ready]);
+  useEffect(()=>{
+    level.current=volume;
+    const el=element.current;
+    if(routed.current)setGain(routed.current,volume);
+    else if(el)el.volume=Math.min(1,volume);
+  },[volume]);
   return video?<video autoPlay playsInline muted ref={node=>{element.current=node;}}/>:<audio autoPlay muted ref={node=>{element.current=node;}}/>;
 }
 // Your own volume for one person (or their stream): 0–200%, remembered in this browser. The speaker icon mutes them for you only.

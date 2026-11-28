@@ -28,29 +28,47 @@ export function setVolume(volumes:Record<string,number>,key:string,value:number)
 export function loadScreenPreview(){try{return localStorage.getItem(previewKey)!=="off";}catch{return true;}}
 export function saveScreenPreview(on:boolean){try{localStorage.setItem(previewKey,on?"on":"off");}catch{/* ignore */}}
 
-// A media element cannot play louder than volume 1, so boosts above 100% go through Web Audio.
-// One context per output device is shared by every boosted person.
+// Remote audio plays through a Web Audio gain node, so a person's volume is applied the same way at every level,
+// including boosts above 100% that a media element cannot reach. Element volume on a remote WebRTC stream is
+// unreliable in Chrome (it is ignored while the same track also feeds an AudioContext, as the speaking meter does).
+// The element still plays the stream, muted: Chrome only decodes remote audio for Web Audio while an element plays it.
+// One context per output device is shared by everyone you hear.
 const contexts=new Map<string,AudioContext>();
 type SinkContext=AudioContext & {setSinkId?(id:string):Promise<void>};
 export function canBoost(output:string){
   if(typeof AudioContext==="undefined")return false;
-  // Without AudioContext.setSinkId a boosted voice would play on the default device instead of the chosen one.
+  // Without AudioContext.setSinkId the audio would play on the default device instead of the chosen one.
   return !output||"setSinkId" in AudioContext.prototype;
 }
-export function boost(stream:MediaStream,gainValue:number,output:string):(()=>void)|null{
+export type Route={gain:GainNode;release:()=>void};
+function contextFor(output:string){
+  let context=contexts.get(output) as SinkContext|undefined;
+  if(!context||context.state==="closed"){
+    context=new AudioContext() as SinkContext;
+    if(output)void context.setSinkId?.(output).catch(()=>{});
+    contexts.set(output,context);
+  }
+  if(context.state!=="running")void context.resume().catch(()=>{});
+  return context;
+}
+// Returns null while the browser keeps audio suspended (no click on the page yet); `ready` fires once it may start.
+export function route(stream:MediaStream,output:string,ready:()=>void):Route|null{
   if(!canBoost(output)||!stream.getAudioTracks().length)return null;
   try{
-    let context=contexts.get(output) as SinkContext|undefined;
-    if(!context||context.state==="closed"){
-      context=new AudioContext() as SinkContext;
-      if(output)void context.setSinkId?.(output).catch(()=>{});
-      contexts.set(output,context);
+    const context=contextFor(output);
+    if(context.state!=="running"){
+      context.addEventListener("statechange",()=>{if(context.state==="running")ready();},{once:true});
+      return null;
     }
-    void context.resume().catch(()=>{});
     const source=context.createMediaStreamSource(stream);
     const gain=context.createGain();
-    gain.gain.value=gainValue;
     source.connect(gain).connect(context.destination);
-    return ()=>{try{source.disconnect();gain.disconnect();}catch{/* already gone */}};
+    return {gain,release:()=>{try{source.disconnect();gain.disconnect();}catch{/* already gone */}}};
   }catch{return null;}
+}
+export function setGain(route:Route,value:number){
+  const now=route.gain.context.currentTime;
+  // A short ramp avoids clicks while a slider is dragged.
+  route.gain.gain.cancelScheduledValues(now);
+  route.gain.gain.setTargetAtTime(value,now,0.015);
 }
