@@ -84,8 +84,8 @@ const MessageRow=memo(function MessageRow({m,previous,replyTo,me,admin,menuOpen,
     </article>
   </div>;
 });
-function IconButton({label,children,onClick,active=false,disabled=false}:{label:string;children:ReactNode;onClick:()=>void;active?:boolean;disabled?:boolean}){
-  return <button type="button" className={"icon-button"+(active?" active":"")} title={label} aria-label={label} aria-pressed={active} onClick={onClick} disabled={disabled}>{children}</button>;
+function IconButton({label,children,onClick,active=false,disabled=false,danger=false}:{label:string;children:ReactNode;onClick:()=>void;active?:boolean;disabled?:boolean;danger?:boolean}){
+  return <button type="button" className={"icon-button"+(active?" active":"")+(danger?" danger":"")} title={label} aria-label={label} aria-pressed={active} onClick={onClick} disabled={disabled}>{children}</button>;
 }
 function inline(text:string) {
   return text.split(/(\*\*[^*\n]+\*\*|_[^_\n]+_|\x60[^\x60\n]+\x60|@[a-z0-9_]+)/gi).map((s,i)=>s.startsWith("**")?<strong key={i}>{s.slice(2,-2)}</strong>:s.startsWith("_")&&s.endsWith("_")?<em key={i}>{s.slice(1,-1)}</em>:s.startsWith("\x60")?<code key={i}>{s.slice(1,-1)}</code>:s.startsWith("@")?<span key={i} className="mention">{s}</span>:s);
@@ -727,11 +727,16 @@ export default function Community(){
         </button>{c.kind==="voice"&&<VoiceMembers members={membersOf(c.id)}/>}</Fragment>)}</details>)}
         <button className="channel dm-button" onClick={()=>{setDmUsers([]);setModal("dm");}}><Plus size={16}/><span>New direct message</span></button>
       </div>
-      {call&&<div className="voice-status"><div><b><i className="voice-dot"/> Voice connected</b><span>{callTitle}</span></div><IconButton label="Disconnect" onClick={()=>voice.disconnect()}><LogOut size={18}/></IconButton></div>}
+      {call&&<div className="voice-status"><div><b><i className="voice-dot"/> Voice connected</b><span>{callTitle}</span></div>
+        <span className="voice-actions">
+          <IconButton label={call.local.has("screen")?"Stop sharing your screen":"Share your screen"} active={call.local.has("screen")} onClick={()=>void call.toggle("screen")}>{call.local.has("screen")?<MonitorOff size={18}/>:<MonitorUp size={18}/>}</IconButton>
+          <IconButton label="Disconnect" onClick={()=>voice.disconnect()}><LogOut size={18}/></IconButton>
+        </span></div>}
       <footer className="profile">
         {person&&<Avatar name={person.name} uid={person.id} has={person.avatar} status={person.status}/>}
         <div><b>{person?.name}</b><small>@{person?.username}</small></div>
-        {call&&<IconButton label={call.microphonePending?"Starting microphone":call.microphoneActive?"Mute microphone":call.local.has("voice")?"Unmute microphone":"Enable microphone"} active={!call.microphoneActive} disabled={call.microphonePending||call.deaf} onClick={()=>void call.toggleMicrophone()}>{call.microphoneActive?<Mic size={16}/>:<MicOff size={16}/>}</IconButton>}
+        <IconButton label={!call?"Join a voice room to use your microphone":call.microphonePending?"Starting microphone":call.microphoneActive?"Mute microphone":call.local.has("voice")?"Unmute microphone":"Enable microphone"} active={!!call&&!call.microphoneActive} danger={!!call&&!call.microphoneActive} disabled={!call||call.microphonePending||call.deaf} onClick={()=>void call?.toggleMicrophone()}>{!call||call.microphoneActive?<Mic size={16}/>:<MicOff size={16}/>}</IconButton>
+        <IconButton label={!call?"Join a voice room to deafen":call.deaf?"Undeafen":"Deafen"} active={!!call?.deaf} danger={!!call?.deaf} disabled={!call} onClick={()=>{if(call)call.setDeaf(!call.deaf);}}>{call?.deaf?<HeadphoneOff size={16}/>:<Headphones size={16}/>}</IconButton>
         <IconButton label="User settings" onClick={()=>setModal("settings")}><Settings size={18}/></IconButton>
       </footer>
     </aside>

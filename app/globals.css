@@ -47,6 +47,8 @@ input[type=file]{max-width:100%}
 .inline{display:flex;align-items:center;gap:9px;flex-wrap:wrap}
 .icon-button{display:inline-grid;place-items:center;flex:none;width:34px;height:34px;padding:0;border:0;background:transparent;color:var(--muted)}
 .icon-button:hover,.icon-button.active{background:var(--wash);color:var(--text)}
+.icon-button.danger,.icon-button.danger:hover{color:var(--danger)}
+.icon-button:disabled{opacity:.45;cursor:not-allowed}
 .entry{min-height:100dvh;display:grid;place-items:center;padding:28px;background:radial-gradient(ellipse at 72% 12%,#3b335c 0,transparent 48%),radial-gradient(ellipse at 10% 85%,#2a2945 0,transparent 47%),var(--sunken)}
 .entry-card{width:min(100%,440px);padding:34px;border:1px solid var(--edge-strong);background:var(--panel);border-radius:var(--r-xl);display:grid;gap:17px;box-shadow:0 36px 96px #1110189c}
 .brand-mark,.mark{display:grid;place-items:center;width:48px;height:48px;font:700 1.9rem var(--font-display);background:var(--accent-strong);color:var(--accent-ink);border:0;border-radius:var(--r-lg)}
@@ -83,9 +85,11 @@ input[type=file]{max-width:100%}
 .profile b,.profile small,.member b,.member small{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .profile b{font-size:.9rem}
 .profile small{font-size:.75rem}
+.profile .icon-button{width:30px;height:30px}
 .voice-status{display:flex;align-items:center;justify-content:space-between;padding:11px;color:var(--green);background:#1c2426;border-top:1px solid var(--edge);font-size:.89rem}
 .voice-status div{display:grid;gap:3px}
 .voice-status span{color:var(--muted)}
+.voice-status .voice-actions{display:flex;align-items:center;gap:2px;flex:none}
 .voice-dot,.presence{width:9px;height:9px;border-radius:50%;display:inline-block;background:var(--green);flex:none}
 .avatar{position:relative;display:inline-grid;place-items:center;width:36px;height:36px;flex:none;border-radius:var(--r-lg);background:#4e4277;color:var(--text);font-weight:700;font-size:.87rem}
 .avatar img{width:100%;height:100%;border-radius:inherit;object-fit:cover}
