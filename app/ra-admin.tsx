@@ -1,7 +1,8 @@
 "use client";
 import {useEffect,useRef,useState,type FormEvent} from "react";
 import {ArrowDown,ArrowUp} from "lucide-react";
-import {request,serverPictureUrl,type Channel,type Person,type Server} from "./ra-client";
+import {request,serverPictureUrl,serverBackground,type Channel,type Person,type Server} from "./ra-client";
+import {backgroundPresets} from "../lib/backgrounds.ts";
 import {confirmAction} from "./dialog";
 type Workspace={servers:Server[];channels:Channel[];settings:{key:string;value:string}[]};
 type State={users:(Person&{seen:number})[];channels:Channel[];logs:{id:number;name:string;action:string;detail:string;time:number}[];streams:{uid:string;name:string;room:string;cam:number;screen:number}[];roles:{server:string;name:string}[];members:{server:string;uid:string;role:string}[]};
@@ -74,6 +75,7 @@ export default function Admin({space,server,report,refresh}:{space:Workspace;ser
         {active.picture&&<button type="button" disabled={uploading} onClick={()=>void act({action:"server_picture_remove",target:targetServer})}>Remove picture</button>}
         <small>PNG, JPEG, GIF or WebP, up to 2 MB. Square images look best.</small>
       </div>}
+      {serverEdit&&active&&<ServerBackground key={active.id+"|"+(active.background??"")+"|"+(active.background_fill??"")+"|"+(active.background_dim??60)} server={active} act={act} report={report} refresh={async()=>{await Promise.all([update(),refresh()]);}}/>}
       <h3>Channels</h3><p>Drag a channel onto another row to move it to that position.</p>
       <div>{channels.map((c,i)=><div className={"admin-row"+(dropTarget===c.id?" drop-target":"")} draggable key={c.id} onDragStart={e=>e.dataTransfer.setData("text/plain",c.id)} onDragOver={e=>{e.preventDefault();setDropTarget(c.id);}} onDragLeave={()=>setDropTarget(t=>t===c.id?"":t)} onDragEnd={()=>setDropTarget("")} onDrop={e=>{
         e.preventDefault();setDropTarget("");
@@ -118,4 +120,47 @@ export default function Admin({space,server,report,refresh}:{space:Workspace;ser
       <p>STUN or a TURN relay can help users on different networks connect. A TURN broker can be configured in Sites using server-only values that issue short-lived credentials.</p><button className="primary">Save settings</button>
     </form>}
   </div>;
+}
+
+// Background for a server's chat area: an uploaded image and/or a colour or gradient, with dimming
+// so messages stay readable. Changes to the fill and dimming are previewed here before saving.
+function ServerBackground({server,act,report,refresh}:{server:Server;act:(input:object)=>Promise<void>;report:(text:string)=>void;refresh:()=>Promise<void>}){
+  const saved=server.background_fill??"";
+  const [kind,setKind]=useState(saved.startsWith("preset:")?"gradient":saved?"colour":"none");
+  const [colour,setColour]=useState(saved.startsWith("#")?saved:"#5865f2");
+  const [gradient,setGradient]=useState(saved.startsWith("preset:")?saved.slice(7):backgroundPresets[0]);
+  const [dim,setDim]=useState(server.background_dim??60);
+  const [uploading,setUploading]=useState(false);
+  const input=useRef<HTMLInputElement>(null);
+  const fill=kind==="colour"?colour:kind==="gradient"?"preset:"+gradient:"";
+  const preview=serverBackground({...server,background_fill:fill,background_dim:dim});
+  const changed=fill!==saved||dim!==(server.background_dim??60);
+  async function upload(file:File){
+    if(file.size>4194304){report("Choose an image up to 4 MB.");return;}
+    const body=new FormData();body.set("file",file);body.set("server",server.id);
+    setUploading(true);
+    try{await request("serverbackground",body);report("Server background updated.");await refresh();}
+    catch(e){report((e as Error).message);}
+    finally{setUploading(false);}
+  }
+  return <section className="server-background">
+    <h3>Background</h3>
+    <p>Shown behind this server&apos;s channels for everyone. Direct messages keep the normal look.</p>
+    <div className="background-preview" style={preview?{background:preview}:undefined} aria-label="Background preview" role="img">
+      <span><b>Preview</b> Messages appear over the background like this.</span>
+    </div>
+    <div className="inline">
+      <input ref={input} hidden type="file" accept="image/png,image/jpeg,image/gif,image/webp" onChange={e=>{const file=e.target.files?.[0];e.target.value="";if(file)void upload(file);}}/>
+      <button type="button" disabled={uploading} onClick={()=>input.current?.click()}>{uploading?"Uploading…":server.background?"Change image":"Upload image"}</button>
+      {server.background&&<button type="button" disabled={uploading} onClick={()=>void act({action:"server_background",target:server.id,fill:saved,dim:server.background_dim??60,removeImage:true})}>Remove image</button>}
+      <small>PNG, JPEG, GIF or WebP, up to 4 MB. Wide images look best.</small>
+    </div>
+    <div className="inline">
+      <label>Colour or gradient<select value={kind} onChange={e=>setKind(e.target.value)}><option value="none">None</option><option value="colour">Solid colour</option><option value="gradient">Gradient</option></select></label>
+      {kind==="colour"&&<label>Colour<input type="color" value={colour} onChange={e=>setColour(e.target.value)}/></label>}
+      {kind==="gradient"&&<label>Gradient<select value={gradient} onChange={e=>setGradient(e.target.value)}>{backgroundPresets.map(p=><option key={p} value={p}>{p[0].toUpperCase()+p.slice(1)}</option>)}</select></label>}
+    </div>
+    <label>Dimming: {dim}%<input type="range" min={0} max={90} step={5} value={dim} onChange={e=>setDim(Number(e.target.value))}/><small>Higher keeps text easier to read.</small></label>
+    <div className="inline"><button type="button" className="primary" disabled={!changed} onClick={()=>void act({action:"server_background",target:server.id,fill,dim})}>Save background</button></div>
+  </section>;
 }

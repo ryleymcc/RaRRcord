@@ -291,6 +291,57 @@ test("only administrators set server pictures and only members of that server ca
   assert.equal(objects.size,0);
 });
 
+test("only administrators set server backgrounds, fills are validated, and old images are cleaned up",async()=>{
+  const {visitor,objects}=fixture();
+  const owner=visitor("owner"), member=visitor("m");
+  await owner("enroll",{input:{username:"owner"}});
+  await member("enroll",{input:{username:"mmm"}});
+  await owner("admin",{input:{action:"account",target:"m",state:"approved",role:"member"}});
+  await member("enroll",{input:{}});
+  const {id:server}=await owner("admin",{input:{action:"server",name:"Backdrops"}});
+  await owner("admin",{input:{action:"member",server,target:"m",role:"member"}});
+  const listed=async(who=owner)=>(await who("workspace")).servers.find(s=>s.id===server);
+  // New servers have no background and the default dimming.
+  assert.deepEqual([(await listed()).background,(await listed()).background_fill,(await listed()).background_dim],[null,"",60]);
+  const png=()=>new File([new Uint8Array([137,80,78,71,13,10,26,10,0,0])],"bg.png");
+  const image=(file=png())=>{const form=new FormData();form.set("server",server);form.set("file",file);return form;};
+  await member("serverbackground",{input:image(),expect:403});
+  await owner("serverbackground",{input:image(new File(["not an image"],"bg.txt")),expect:415});
+  await owner("serverbackground",{input:image(new File([new Uint8Array(4194305)],"big.png")),expect:413});
+  assert.equal(objects.size,0);
+  await owner("serverbackground",{input:image()});
+  assert.equal(objects.size,1);
+  assert.equal((await listed()).background.length,8);
+  // Members of the server can load it; the image itself stays behind the API.
+  await member("serverbackground?key="+server,{contentType:"image/png"});
+  await visitor("stranger")("serverbackground?key="+server,{expect:403});
+  const outsider=visitor("o");
+  await outsider("enroll",{input:{username:"ooo"}});
+  await owner("admin",{input:{action:"account",target:"o",state:"approved",role:"member"}});
+  await outsider("enroll",{input:{}});
+  await outsider("serverbackground?key="+server,{expect:404});
+  // Replacing the image removes the old file.
+  await owner("serverbackground",{input:image()});
+  assert.equal(objects.size,1);
+  // Colours, gradients and dimming.
+  await member("admin",{input:{action:"server_background",target:server,fill:"#123456",dim:40},expect:403});
+  for (const fill of ["red","#12345","url(x)","preset:nope","#123456;color:red"]) await owner("admin",{input:{action:"server_background",target:server,fill,dim:40},expect:400});
+  await owner("admin",{input:{action:"server_background",target:server,fill:"#123456",dim:91},expect:400});
+  await owner("admin",{input:{action:"server_background",target:"nope",fill:"",dim:40},expect:404});
+  await owner("admin",{input:{action:"server_background",target:server,fill:"#ABCDEF",dim:35}});
+  assert.deepEqual([(await listed(member)).background_fill,(await listed(member)).background_dim],["#abcdef",35]);
+  assert.equal(objects.size,1);
+  await owner("admin",{input:{action:"server_background",target:server,fill:"preset:aurora",dim:70,removeImage:true}});
+  assert.equal(objects.size,0);
+  assert.deepEqual([(await listed()).background,(await listed()).background_fill],[null,"preset:aurora"]);
+  await owner("serverbackground?key="+server,{expect:404});
+  // Deleting the server removes its background image too.
+  await owner("serverbackground",{input:image()});
+  assert.equal(objects.size,1);
+  await owner("admin",{input:{action:"server_delete",target:server}});
+  assert.equal(objects.size,0);
+});
+
 test("Cloudflare TURN credentials are fetched for calls and port 53 addresses are dropped",async()=>{
   const {visitor,env}=fixture();
   env.RARRCORD_TURN_KEY_ID="key1";env.RARRCORD_TURN_KEY_TOKEN="secret";
@@ -413,4 +464,68 @@ test("voice rooms list people in the order they joined, and the member list alph
     const members=(await owner("workspace")).people.map(p=>p.id);
     assert.deepEqual(members,["amy","bob","owner","zed"]);
   } finally {Date.now=realNow;}
+});
+
+test("moderators can disconnect, kick and time out members for a chosen length, and it is audited",async()=>{
+  const {visitor}=fixture();
+  const owner=visitor("owner"), member=visitor("member"), mod=visitor("mod"), other=visitor("other");
+  await owner("enroll",{input:{username:"owner"}});
+  for(const [id,client] of [["member",member],["mod",mod],["other",other]]){
+    await client("enroll",{input:{username:id}});
+    await owner("admin",{input:{action:"account",target:id,state:"approved",role:"member"}});
+    await client("enroll",{input:{}});
+  }
+  const act=(client,input,expect=200)=>client("moderate",{input:{server:"community",...input},expect});
+  // Ordinary members cannot moderate; moderators cannot act on admins, other moderators or themselves.
+  await act(member,{action:"timeout",target:"other",duration:60000},403);
+  await owner("admin",{input:{action:"member",server:"community",target:"mod",role:"moderator"}});
+  await act(mod,{action:"kick",target:"owner"},403);
+  await act(mod,{action:"timeout",target:"mod",duration:60000},409);
+  await act(owner,{action:"timeout",target:"member",duration:30000},400);
+  await act(owner,{action:"timeout",target:"member",duration:29*86400000},400);
+
+  // Disconnect from voice.
+  const peer=crypto.randomUUID();
+  await member("voice",{input:{action:"join",channel:"gaming",peer}});
+  await act(mod,{action:"disconnect",target:"member"});
+  assert.equal((await member("poll?peer="+peer)).voice,null);
+  await act(mod,{action:"disconnect",target:"member"},404);
+
+  // A timeout of 90 minutes stops messages, reactions, edits and voice, but not reading.
+  await member("message",{input:{channel:"general",text:"Before"}});
+  const mid=(await member("history?channel=general")).messages[0].id;
+  await member("voice",{input:{action:"join",channel:"gaming",peer}});
+  await act(mod,{action:"timeout",target:"member",duration:90*60000});
+  assert.equal((await member("poll?peer="+peer)).voice,null);
+  const refused=await member("message",{input:{channel:"general",text:"During"},expect:403});
+  assert.match(refused.error,/timed out in this server for 90 minutes/);
+  await member("message",{input:{channel:"general",action:"react",id:mid,emoji:"👍"},expect:403});
+  await member("message",{input:{channel:"general",action:"edit",id:mid,text:"Edited"},expect:403});
+  await member("voice",{input:{action:"join",channel:"gaming",peer},expect:403});
+  await member("typing",{input:{channel:"general"}});
+  assert.deepEqual((await other("poll?channel=general&after=0")).typing,[]);
+  assert.equal((await member("history?channel=general")).messages.length,1);
+  const timeouts=(await other("workspace")).timeouts;
+  assert.equal(timeouts.length,1);
+  assert.equal(timeouts[0].uid,"member");
+  // Lifting it restores everything.
+  await act(owner,{action:"timeout",target:"member",duration:0});
+  await member("message",{input:{channel:"general",text:"After"}});
+  assert.deepEqual((await other("workspace")).timeouts,[]);
+
+  // Kicking removes the person from the server and its rooms.
+  await member("voice",{input:{action:"join",channel:"gaming",peer}});
+  await act(mod,{action:"kick",target:"member"});
+  await member("history?channel=general",{expect:404});
+  await member("voice",{input:{action:"join",channel:"gaming",peer},expect:404});
+  assert.deepEqual((await owner("poll?rooms=1")).rooms,[]);
+  await act(mod,{action:"kick",target:"member"},404);
+
+  const logs=(await owner("admin")).logs.filter(l=>["voice disconnect","timeout","timeout removed","kick"].includes(l.action)).map(l=>l.uid+" "+l.action+": "+l.detail).reverse();
+  assert.deepEqual(logs,[
+    "mod voice disconnect: member in community",
+    "mod timeout: member in community for 90 minutes",
+    "owner timeout removed: member in community lifted",
+    "mod kick: member in community",
+  ]);
 });

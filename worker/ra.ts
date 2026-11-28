@@ -1,5 +1,7 @@
 import { EMAIL_HEADER, ID_HEADER, signOutPath } from "./identity.ts";
+import { localOrigin, localLogout } from "./local-auth.ts";
 import { allow, dailyUploadBytes, readLimits } from "./limits.ts";
+import { backgroundPresets } from "../lib/backgrounds.ts";
 
 type Value = string | number | null;
 type User = { id:string; username:string; name:string; state:string; role:string; status:string; seen:number; avatar:string|null; epoch:number; prefs:string };
@@ -10,6 +12,17 @@ type Input = Record<string, unknown>;
 const day = 86400000;
 const lease = 16000;
 const movedPeer = (peer:string) => "moved:"+peer;
+// "45 seconds", "90 minutes", "1 hour", "36 hours", "2 days": the largest unit that is either
+// exact or at least two of it. Keep in step with timeLeft in app/moderate-member.tsx.
+export const timeLeft = (ms:number) => {
+  // Round up to the second, and past a minute to the minute, so "1:59:50" reads "2 hours".
+  ms=Math.ceil(ms/1000)*1000;
+  if (ms>60000) ms=Math.ceil(ms/60000)*60000;
+  const units=[[86400000,"day"],[3600000,"hour"],[60000,"minute"],[1000,"second"]] as const;
+  const [size,unit]=units.find(([size])=>ms%size===0&&ms>=size || ms>=2*size) ?? units[3];
+  const n=Math.ceil(ms/size);
+  return n+" "+unit+(n===1?"":"s");
+};
 const sessionName = "__Host-rarr";
 const authHeaders = { "cache-control":"private, no-store", "x-content-type-options":"nosniff" };
 const unicodeEmoji = new RegExp("^(?:\\p{RGI_Emoji})$", "v");
@@ -76,7 +89,7 @@ async function route(request:Request, env:Cloudflare.Env):Promise<Response> {
   const now=Date.now();
   const write=request.method==="POST";
   if (!write && request.method!=="GET") deny(405,"Method unsupported.");
-  if (write && request.headers.get("origin")!==url.origin) deny(403,"This request must come from RaRRcord.");
+  if (write && request.headers.get("origin")!==(env.RARRCORD_AUTH==="local" ? localOrigin(env) : url.origin)) deny(403,"This request must come from RaRRcord.");
   // Set only by worker/identity.ts after it verifies the sign-in.
   const id=request.headers.get(ID_HEADER);
   const email=request.headers.get(EMAIL_HEADER);
@@ -102,7 +115,7 @@ async function route(request:Request, env:Cloudflare.Env):Promise<Response> {
   const validSession=async (account:User)=> !!sessionKey && !!await one(
     "SELECT token FROM sessions WHERE token=? AND uid=? AND epoch=? AND expires>?",sessionKey,id,account.epoch,now);
   const audit=(action:string, detail:string)=>sql("INSERT INTO audit(uid,action,detail,time) VALUES(?,?,?,?)",id,action,detail,now);
-  const upload = path==="upload" || path==="avatar" || path==="servericon";
+  const upload = path==="upload" || path==="avatar" || path==="servericon" || path==="serverbackground";
   let body:Input={};
   if (write && !upload) {
     if (!request.headers.get("content-type")?.startsWith("application/json")) deny(415,"Expected JSON.");
@@ -120,8 +133,11 @@ async function route(request:Request, env:Cloudflare.Env):Promise<Response> {
   if (path==="enroll" && write) {
     if (!user) {
       const owner=!!env.RARRCORD_OWNER_EMAIL && email.toLowerCase()===env.RARRCORD_OWNER_EMAIL.trim().toLowerCase();
-      const username=string(body.username,24,3).toLowerCase();
-      const name=label(body.name ?? username,40);
+      const local=env.RARRCORD_AUTH==="local";
+      const username=local ? id.slice(6) : string(body.username,24,3).toLowerCase();
+      if (local && (!id.startsWith("local:") || (body.username!==undefined && body.username!==username))) deny(400,"Use your sign-in username.");
+      // Local profiles never accept arbitrary display names from onboarding or autofill.
+      const name=local ? username : label(body.name ?? username,40);
       if (await nameTaken(db,name,id)) deny(409,"Another member already uses that name.");
       if (!/^[a-z0-9_]+$/.test(username)) deny(400,"Use letters, numbers and underscores.");
       if (await one("SELECT 1 FROM users WHERE username=? OR lower(name)=?",username,username)) deny(409,"Username already taken.");
@@ -160,7 +176,9 @@ async function route(request:Request, env:Cloudflare.Env):Promise<Response> {
   if (path==="logout" && write) {
     if (sessionKey) await run("DELETE FROM sessions WHERE uid=? AND token=?",id,sessionKey);
     if (user) await run("DELETE FROM voice WHERE uid=?",id);
-    return json({signOut:signOutPath(env)},200,{"set-cookie":cookie("",0)});
+    const response=json({signOut:signOutPath(env)},200,{"set-cookie":cookie("",0)});
+    if (env.RARRCORD_AUTH==="local") response.headers.append("set-cookie",await localLogout(request,env));
+    return response;
   }
   if (!user || user.state!=="approved" || !live) deny(403,"Your RaRRcord session does not have access.");
   const account=user;
@@ -173,11 +191,18 @@ async function route(request:Request, env:Cloudflare.Env):Promise<Response> {
   };
   const cid=()=>string(write?body.channel:q.get("channel"),64);
   const checkMessageTarget=async (channel:Channel, reply:number|null)=>{
+    await timedOut(channel);
     if (reply && !await one("SELECT 1 FROM messages WHERE id=? AND channel=? AND deleted=0",reply,channel.id)) deny(404,"Reply target unavailable.");
     if (channel.kind==="dm" && await one("SELECT 1 FROM channel_members cm JOIN blocks b ON (b.uid=? AND b.blocked=cm.uid) OR (b.uid=cm.uid AND b.blocked=?) WHERE cm.channel=?",id,id,channel.id)) deny(403,"Direct messaging unavailable.");
   };
   const moderate=async (channel:Channel)=> admin || !!(channel.server && await one(
     "SELECT 1 FROM members WHERE server=? AND uid=? AND role='moderator'",channel.server,id));
+  // A timed-out member can read but cannot post, react, type or join voice in that server until it ends.
+  const timedOut=async (channel:Channel)=>{
+    if (!channel.server) return;
+    const row=await one<{timeout:number}>("SELECT timeout FROM members WHERE server=? AND uid=? AND timeout>?",channel.server,id,now);
+    if (row) deny(403,"You are timed out in this server for "+timeLeft(row.timeout-now)+".");
+  };
   const throttle=async (bucket:string, limit:number)=>{
     const minute=Math.floor(now/60000);
     const row=await one<{hits:number}>("INSERT INTO rate(uid,bucket,minute,hits) VALUES(?,?,?,1) ON CONFLICT(uid,bucket) DO UPDATE SET hits=CASE WHEN minute=excluded.minute THEN hits+1 ELSE 1 END, minute=excluded.minute RETURNING hits",id,bucket,minute);
@@ -191,12 +216,14 @@ async function route(request:Request, env:Cloudflare.Env):Promise<Response> {
   if (path==="workspace" && !write) {
     return json({
       // "picture" is only a short version tag for cache busting; the storage key itself stays on the server.
-      servers:await all("SELECT s.id,s.name,s.icon,substr(s.picture,1,8) AS picture FROM servers s WHERE ?='admin' OR EXISTS (SELECT 1 FROM members WHERE server=s.id AND uid=?) ORDER BY name",account.role,id),
+      servers:await all("SELECT s.id,s.name,s.icon,substr(s.picture,1,8) AS picture,substr(s.background,1,8) AS background,s.background_fill,s.background_dim FROM servers s WHERE ?='admin' OR EXISTS (SELECT 1 FROM members WHERE server=s.id AND uid=?) ORDER BY name",account.role,id),
       channels:await all("SELECT c.*, (SELECT COUNT(*) FROM messages m WHERE m.channel=c.id AND m.deleted=0 AND m.uid<>? AND m.id>COALESCE((SELECT mid FROM reads WHERE uid=? AND channel=c.id),0)) unread FROM channels c WHERE "+channelAccess("c")+" ORDER BY position,c.name",id,id,...access),
       people:await all("SELECT u.id,u.name,u.username,u.role,u.avatar IS NOT NULL AS avatar,CASE WHEN u.seen<? THEN 'offline' ELSE u.status END status FROM users u WHERE u.state='approved' AND (u.id=? OR ?='admin' OR EXISTS (SELECT 1 FROM members a JOIN members b ON a.server=b.server WHERE a.uid=? AND b.uid=u.id)) ORDER BY u.name COLLATE NOCASE,u.id",now-25000,id,account.role,id),
       settings:await all("SELECT key,value FROM settings WHERE key IN ('bitrate','upload','stun')"),
       prefs:JSON.parse(account.prefs),
       // Servers where this account may move people between voice rooms.
+      // Members currently timed out in servers this account can see, so the app can label them.
+      timeouts:await all("SELECT m.server,m.uid,m.timeout FROM members m JOIN servers s ON s.id=m.server WHERE m.timeout>? AND (?='admin' OR EXISTS (SELECT 1 FROM members x WHERE x.server=m.server AND x.uid=?))",now,account.role,id),
       moderates:admin?(await all<{id:string}>("SELECT id FROM servers")).map(s=>s.id):
         (await all<{server:string}>("SELECT server FROM members WHERE uid=? AND role='moderator'",id)).map(m=>m.server),
     });
@@ -287,14 +314,14 @@ async function route(request:Request, env:Cloudflare.Env):Promise<Response> {
   }
   if (path==="transport" && !write) {
     if (request.headers.get("upgrade")?.toLowerCase()!=="websocket") return json({transport:"authenticated polling"});
-    if (request.headers.get("origin")!==url.origin) deny(403,"Invalid WebSocket origin.");
+    if (request.headers.get("origin")!==(env.RARRCORD_AUTH==="local" ? localOrigin(env) : url.origin)) deny(403,"Invalid WebSocket origin.");
     const sockets=new WebSocketPair();
     sockets[1].accept();
     sockets[1].send("RaRRcord WebSocket runtime probe");
     sockets[1].close(1000,"Probe complete");
     return new Response(null,{status:101,webSocket:sockets[0]});
   }
-  if ((path==="attachment" || path==="avatar" || path==="servericon") && !write) {
+  if ((path==="attachment" || path==="avatar" || path==="servericon" || path==="serverbackground") && !write) {
     if (!env.BUCKET) deny(503,"File storage unavailable.");
     const key=string(q.get("key"),100);
     let storageKey=key;
@@ -309,6 +336,11 @@ async function route(request:Request, env:Cloudflare.Env):Promise<Response> {
       const row=await one<{picture:string|null}>("SELECT s.picture FROM servers s WHERE s.id=? AND (?='admin' OR EXISTS (SELECT 1 FROM members WHERE server=s.id AND uid=?))",key,account.role,id);
       if (!row?.picture) deny(404,"Server picture unavailable.");
       storageKey=row.picture;
+    } else if (path==="serverbackground") {
+      // Same rule as the server picture: only people who can see the server can load its background.
+      const row=await one<{background:string|null}>("SELECT s.background FROM servers s WHERE s.id=? AND (?='admin' OR EXISTS (SELECT 1 FROM members WHERE server=s.id AND uid=?))",key,account.role,id);
+      if (!row?.background) deny(404,"Server background unavailable.");
+      storageKey=row.background;
     } else {
       const row=await one<{avatar:string|null}>("SELECT avatar FROM users WHERE id=? AND state='approved'",key);
       if (!row?.avatar) deny(404,"Avatar unavailable.");
@@ -337,12 +369,14 @@ async function route(request:Request, env:Cloudflare.Env):Promise<Response> {
     });
   }
   if (!write) deny(404,"Unknown operation.");
-  if (path==="upload" || path==="avatar" || path==="servericon") {
-    if (path==="servericon" && !admin) deny(403,"Administrator access required.");
+  if (path==="upload" || path==="avatar" || path==="servericon" || path==="serverbackground") {
+    // Server pictures and backgrounds are both per-server images that only administrators may change.
+    const serverImage=path==="servericon" || path==="serverbackground";
+    if (serverImage && !admin) deny(403,"Administrator access required.");
     await throttle(path,18);
     if (!env.BUCKET) deny(503,"File storage unavailable.");
     const config=await one<{value:string}>("SELECT value FROM settings WHERE key='upload'");
-    const limit=path!=="upload"?2097152:Math.min(Number(config?.value??8000000),20000000);
+    const limit=path==="serverbackground"?4194304:path!=="upload"?2097152:Math.min(Number(config?.value??8000000),20000000);
     // Without a length the whole body would be buffered before the size check below.
     const length=Number(request.headers.get("content-length"));
     if (!request.headers.has("content-length") || !Number.isSafeInteger(length)) deny(411,"Upload length required.");
@@ -354,8 +388,8 @@ async function route(request:Request, env:Cloudflare.Env):Promise<Response> {
     const file=data.get("file");
     if (!file || typeof file==="string" || !file.size || file.size>limit) deny(413,"File missing or too large.");
     const c=path==="upload"?await chan(string(data.get("channel"),64)):null;
-    const serverId=path==="servericon"?string(data.get("server"),64):"";
-    if (path==="servericon" && !await one("SELECT 1 FROM servers WHERE id=?",serverId)) deny(404,"Server unavailable.");
+    const serverId=serverImage?string(data.get("server"),64):"";
+    if (serverImage && !await one("SELECT 1 FROM servers WHERE id=?",serverId)) deny(404,"Server unavailable.");
     const gif=c && data.get("gif")==="1";
     const caption=gif?string(data.get("text")??"",8000,0):"";
     const reply=gif && data.has("reply")?number(data.get("reply")):null;
@@ -384,6 +418,10 @@ async function route(request:Request, env:Cloudflare.Env):Promise<Response> {
         const old=await one<{picture:string|null}>("SELECT picture FROM servers WHERE id=?",serverId);
         await db.batch([sql("UPDATE servers SET picture=? WHERE id=?",key,serverId),sql("INSERT INTO audit(uid,action,detail,time) VALUES(?,?,?,?)",id,"server_picture",serverId,now),tally]);
         if (old?.picture) await env.BUCKET.delete(old.picture);
+      } else if (path==="serverbackground") {
+        const old=await one<{background:string|null}>("SELECT background FROM servers WHERE id=?",serverId);
+        await db.batch([sql("UPDATE servers SET background=? WHERE id=?",key,serverId),sql("INSERT INTO audit(uid,action,detail,time) VALUES(?,?,?,?)",id,"server_background",serverId,now),tally]);
+        if (old?.background) await env.BUCKET.delete(old.background);
       } else {
         await db.batch([sql("UPDATE users SET avatar=? WHERE id=?",key,id),tally]);
         if (account.avatar) await env.BUCKET.delete(account.avatar);
@@ -421,6 +459,7 @@ async function route(request:Request, env:Cloudflare.Env):Promise<Response> {
       return json({});
     }
     if (action==="edit" && m.uid===id) {
+      await timedOut(c);
       await db.batch([sql("UPDATE messages SET body=?,edited=? WHERE id=?",string(body.text,8000),now,mid),changed(c.id,mid)]);
     } else if (action==="delete" && (m.uid===id || await moderate(c))) {
       await db.batch([sql("UPDATE messages SET deleted=1,body='',attachment=NULL,filename=NULL WHERE id=?",mid),changed(c.id,mid)]);
@@ -441,13 +480,15 @@ async function route(request:Request, env:Cloudflare.Env):Promise<Response> {
       }
     } else {
       await throttle(path,25);
+      // Typing while timed out is ignored rather than refused, so the composer stays quiet.
+      if (c.server && await one("SELECT 1 FROM members WHERE server=? AND uid=? AND timeout>?",c.server,id,now)) return json({});
       await run("INSERT INTO typing(channel,uid,expires) VALUES(?,?,?) ON CONFLICT(channel,uid) DO UPDATE SET expires=excluded.expires",c.id,id,now+5000);
     }
     return json({});
   }
   if (path==="profile") {
     await throttle(path,12);
-    const name=label(body.name,40);
+    const name=env.RARRCORD_AUTH==="local" ? account.username : label(body.name,40);
     if (await nameTaken(db,name,id)) deny(409,"Another member already uses that name.");
     const status=string(body.status,10);
     if (!["online","idle","dnd","offline"].includes(status)) deny(400,"Invalid status.");
@@ -477,6 +518,46 @@ async function route(request:Request, env:Cloudflare.Env):Promise<Response> {
     await db.batch([sql("INSERT OR IGNORE INTO channels(id,name,kind,category) VALUES(?,?,'dm','Direct messages')",dm,label(body.name??names.join(", ").slice(0,80),80)),
       ...[id,...ids].map(uid=>sql("INSERT OR IGNORE INTO channel_members(channel,uid) VALUES(?,?)",dm,uid))]);
     return json({id:dm});
+  }
+  if (path==="moderate") {
+    // Disconnect from voice, kick from a server, or time out, like Discord's member actions.
+    // Administrators can act on anyone but themselves and other administrators; a server's
+    // moderators can act on its ordinary members.
+    await throttle(path,30);
+    const action=string(body.action,16), target=string(body.target,200), server=string(body.server,64);
+    if (!["disconnect","kick","timeout"].includes(action)) deny(400,"Invalid moderation action.");
+    if (!await one("SELECT 1 FROM servers WHERE id=?",server)) deny(404,"Server unavailable.");
+    const mine=await one<{role:string}>("SELECT role FROM members WHERE server=? AND uid=?",server,id);
+    if (!admin && mine?.role!=="moderator") deny(403,"Moderating members requires administrator or moderator access.");
+    if (target===id) deny(409,"You cannot do that to yourself.");
+    const person=await one<User>("SELECT * FROM users WHERE id=?",target);
+    const membership=await one<{role:string}>("SELECT role FROM members WHERE server=? AND uid=?",server,target);
+    if (!person || !membership) deny(404,"That person is not in this server.");
+    if (person.role==="admin") deny(403,"Administrators cannot be kicked or timed out.");
+    if (!admin && membership.role==="moderator") deny(403,"Only an administrator can moderate another moderator.");
+    // Voice rooms of this server that the person is in.
+    const leaveVoice=sql("DELETE FROM voice WHERE uid=? AND channel IN (SELECT id FROM channels WHERE server=? AND kind='voice')",target,server);
+    const commands:D1PreparedStatement[]=[];
+    let detail=target+" in "+server;
+    if (action==="disconnect") {
+      if (!await one("SELECT 1 FROM voice v JOIN channels c ON c.id=v.channel WHERE v.uid=? AND c.server=? AND v.expires>?",target,server,now)) deny(404,"That person is not in a voice room here.");
+      commands.push(leaveVoice);
+    } else if (action==="kick") {
+      commands.push(leaveVoice,
+        sql("DELETE FROM typing WHERE uid=? AND channel IN (SELECT id FROM channels WHERE server=?)",target,server),
+        sql("DELETE FROM members WHERE server=? AND uid=?",server,target));
+    } else {
+      // 0 lifts a timeout; otherwise one minute to 28 days, Discord's limit.
+      const duration=number(body.duration);
+      if (duration!==0 && (duration<60000 || duration>28*day)) deny(400,"Choose a timeout between one minute and 28 days.");
+      const until=duration?now+duration:0;
+      commands.push(sql("UPDATE members SET timeout=? WHERE server=? AND uid=?",until,server,target));
+      if (duration) commands.push(leaveVoice,sql("DELETE FROM typing WHERE uid=? AND channel IN (SELECT id FROM channels WHERE server=?)",target,server));
+      detail+=duration?" for "+timeLeft(duration):" lifted";
+    }
+    commands.push(audit(action==="timeout"&&!number(body.duration)?"timeout removed":action==="disconnect"?"voice disconnect":action,detail));
+    await db.batch(commands);
+    return json({});
   }
   if (path==="move" && write) {
     // Moving someone between voice rooms, Discord's "Move members". Administrators can move anyone;
@@ -509,6 +590,7 @@ async function route(request:Request, env:Cloudflare.Env):Promise<Response> {
     if (!/^[a-f0-9-]{36}$/.test(peer)) deny(400,"Invalid peer ID.");
     if (path==="voice" && body.action==="join") {
       await throttle("join",15);
+      await timedOut(room);
       const count=await one<{count:number}>("SELECT COUNT(*) count FROM voice WHERE channel=? AND expires>? AND uid<>?",room.id,now,id);
       if ((count?.count??0)>=6) deny(409,"This room already has six peers.");
       // joined orders the room's roster and tiles. A reconnect into the same room keeps its place;
@@ -567,11 +649,13 @@ async function route(request:Request, env:Cloudflare.Env):Promise<Response> {
       if (downgrade && !await one("SELECT 1 FROM users WHERE id<>? AND role='admin' AND state='approved'",target)) deny(409,"Keep at least one active administrator.");
       commands.push(sql("UPDATE users SET state=?,role=?,epoch=epoch+1 WHERE id=? AND (role<>'admin' OR (?='approved' AND ?='admin') OR EXISTS (SELECT 1 FROM users WHERE id<>? AND role='admin' AND state='approved'))",state,role,target,state,role,target));
       commands.push(sql("DELETE FROM sessions WHERE uid=?",target),sql("DELETE FROM voice WHERE uid=?",target));
+      if (env.RARRCORD_AUTH==="local" && ["suspended","banned","deleted"].includes(state)) commands.push(sql("DELETE FROM local_sessions WHERE username=?",target.slice(6)));
       if (state==="deleted") {
         commands.push(sql("UPDATE users SET name='Deleted user', avatar=NULL,prefs='{}' WHERE id=?",target));
         if (existing.avatar) files.push(existing.avatar);
       }
     } else if (action==="revoke") {
+      if (env.RARRCORD_AUTH==="local") commands.push(sql("DELETE FROM local_sessions WHERE username=?",target.slice(6)));
       commands.push(sql("UPDATE users SET epoch=epoch+1 WHERE id=?",target),sql("DELETE FROM sessions WHERE uid=?",target),sql("DELETE FROM voice WHERE uid=?",target));
     } else if (action==="disconnect") commands.push(sql("DELETE FROM voice WHERE uid=?",target));
     else if (action==="server") {
@@ -583,10 +667,22 @@ async function route(request:Request, env:Cloudflare.Env):Promise<Response> {
       if (!row) deny(404,"Server unavailable.");
       commands.push(sql("UPDATE servers SET picture=NULL WHERE id=?",target));
       if (row.picture) files.push(row.picture);
+    } else if (action==="server_background") {
+      // Sets the colour or gradient and the dimming; removeImage also clears an uploaded image.
+      const row=await one<{background:string|null}>("SELECT background FROM servers WHERE id=?",target);
+      if (!row) deny(404,"Server unavailable.");
+      const fill=string(body.fill??"",24,0).toLowerCase();
+      if (fill && !/^#[0-9a-f]{6}$/.test(fill) && !backgroundPresets.some(p=>fill==="preset:"+p)) deny(400,"Choose a colour or one of the gradients.");
+      const dim=number(body.dim,60);
+      if (dim>90) deny(400,"Dimming must be between 0 and 90.");
+      const removeImage=body.removeImage===true;
+      commands.push(sql("UPDATE servers SET background_fill=?,background_dim=?"+(removeImage?",background=NULL":"")+" WHERE id=?",fill,dim,target));
+      if (removeImage && row.background) files.push(row.background);
     } else if (action==="server_delete") {
       await purge("SELECT id FROM channels WHERE server=?",target);
-      const old=await one<{picture:string|null}>("SELECT picture FROM servers WHERE id=?",target);
+      const old=await one<{picture:string|null;background:string|null}>("SELECT picture,background FROM servers WHERE id=?",target);
       if (old?.picture) files.push(old.picture);
+      if (old?.background) files.push(old.background);
       commands.push(sql("DELETE FROM channels WHERE server=?",target),sql("DELETE FROM members WHERE server=?",target),sql("DELETE FROM roles WHERE server=?",target),sql("DELETE FROM invites WHERE server=?",target),sql("DELETE FROM servers WHERE id=?",target));
     } else if (action==="channel") {
       const server=string(body.server,64), name=label(body.name,60), kind=string(body.kind,12);

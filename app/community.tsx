@@ -5,18 +5,19 @@ import { ConfirmHost, Modal, confirmAction } from "./dialog";
 import { friendlyError } from "./friendly-error";
 import { useMedia } from "./use-media";
 import QuickSwitcher from "./quick-switcher";
+import ModerateMember, { timeLeft } from "./moderate-member";
 import { isImage, typingText, uploadWithProgress } from "./upload";
 import { cleanAnnouncements, joinAnnouncement, playVoiceCue, speakAnnouncement } from "./voice-sounds";
 import { canBoost, route, setGain, type Route, loadScreenPreview, loadVolumes, maxVolume, saveScreenPreview, setVolume, streamVolumeKey } from "./user-volume";
 import { microphoneConstraints, preloadVoice, processVoice, suppressionMode, suppressionModes, type VoiceProcessor } from "./noise-suppression";
 import { VoiceSession, codecs, iceServers, type Call, type Feed, type Metrics, type Participant, type Signal } from "./rtc";
-import { request, defaults, qualities, serverPictureUrl, type Channel, type Message, type Person, type Preferences, type Server } from "./ra-client";
+import { request, defaults, qualities, serverPictureUrl, serverBackground, type Channel, type Message, type Person, type Preferences, type Server } from "./ra-client";
 import Admin from "./ra-admin";
 import { DiagnosticCharts, WebRtcInternals } from "./diagnostic-charts";
 import { diagnosticSample, type DiagnosticSample } from "./diagnostic-data";
 import EmojiPicker from "./emoji-picker";
 
-type Workspace={servers:Server[]; channels:Channel[]; people:Person[]; settings:{key:string;value:string}[];prefs:Partial<Preferences>;moderates?:string[]};
+type Workspace={servers:Server[]; channels:Channel[]; people:Person[]; settings:{key:string;value:string}[];prefs:Partial<Preferences>;moderates?:string[];timeouts?:{server:string;uid:string;timeout:number}[]};
 type Auth={user:Person|null;active:boolean;ownerConfigured?:boolean};
 type History={messages:Message[];cursor:number};
 type RoomMember={channel:string;uid:string;name:string;has_avatar:boolean;cam:number;screen:number};
@@ -34,11 +35,12 @@ function Avatar({name,uid,has,status}:{name:string;uid:string;has?:boolean;statu
 type VoiceMember={uid:string;name:string;avatar:boolean;live:boolean;cam:boolean;speaking:boolean};
 // Dragging a person between voice rooms carries their user id under this type.
 const voiceMoveType="application/x-rarrcord-voice-member";
-function VoiceMembers({members,movable,dropProps}:{members:VoiceMember[];movable:boolean;dropProps?:HTMLAttributes<HTMLElement>}){
+function VoiceMembers({members,movable,dropProps,manage}:{members:VoiceMember[];movable:boolean;dropProps?:HTMLAttributes<HTMLElement>;manage?:(uid:string)=>void}){
   if(!members.length)return null;
   return <ul className="voice-members" aria-label="In this voice room" {...dropProps}>{members.map(m=><li key={m.uid} className={(m.speaking?"speaking":"")+(movable?" movable":"")}
     draggable={movable||undefined} title={movable?"Drag to another voice room to move "+m.name:undefined}
-    onDragStart={movable?e=>{e.dataTransfer.setData(voiceMoveType,m.uid);e.dataTransfer.setData("text/plain",m.name);e.dataTransfer.effectAllowed="move";}:undefined}>
+    onDragStart={movable?e=>{e.dataTransfer.setData(voiceMoveType,m.uid);e.dataTransfer.setData("text/plain",m.name);e.dataTransfer.effectAllowed="move";}:undefined}
+    onContextMenu={manage?e=>{e.preventDefault();manage(m.uid);}:undefined}>
     <Avatar name={m.name} uid={m.uid} has={m.avatar}/><span>{m.name}</span>{m.cam&&<Video size={13} aria-label="Camera on"/>}{m.live&&<b className="live-tag">LIVE</b>}
   </li>)}</ul>;
 }
@@ -217,7 +219,7 @@ function Diagnostics({call,latency,errors}:{call:Call|null;latency:number|null;e
     <WebRtcInternals/>
     <p>Screen capture {typeof navigator.mediaDevices?.getDisplayMedia==="function"?"available":"unavailable"} · Microphone {devices.some(d=>d.kind==="audioinput")?"detected":"unavailable"} · Camera {devices.some(d=>d.kind==="videoinput")?"detected":"unavailable"}</p>
     <p>Local codecs {typeof RTCRtpSender==="undefined"?"Unavailable":codecs().join(", ")||"Unavailable"}</p>
-    <p>Screen capture {capture?.width&&capture.height?capture.width+" × "+capture.height+" · "+value(capture.frameRate," FPS"):"Unavailable"}</p>
+    <p>Screen capture {capture?.width&&capture.height?capture.width+" × "+capture.height+" · "+value(capture.frameRate," FPS"):"Unavailable"}{call?.governor&&call.governor.fps<call.governor.top?" · lowered from "+call.governor.top+" FPS to keep your PC responsive":""}</p>
     <DiagnosticCharts key={call?.peer} samples={samples}/>
     {!records.length&&<p>Join a voice room with another participant to measure a peer connection.</p>}
     {records.map(r=><div className="metric-card" key={JSON.stringify([r.peer,r.stream])}><h3>{r.name} · {r.direction}</h3><dl>{[
@@ -235,7 +237,7 @@ function Diagnostics({call,latency,errors}:{call:Call|null;latency:number|null;e
   </div>;
 }
 const settingsTabs=[["profile","Profile"],["voice","Voice and video"],["screen","Screen share"],["app","Notifications"]] as const;
-function UserSettings({person,prefs,limit,save,report,signOut}:{person:Person;prefs:Preferences;limit:number;save:()=>void;report:(x:string)=>void;signOut:()=>void}){
+function UserSettings({person,prefs,limit,save,report,signOut,localAuth}:{localAuth:boolean;person:Person;prefs:Preferences;limit:number;save:()=>void;report:(x:string)=>void;signOut:()=>void}){
   const [tab,setTab]=useState<(typeof settingsTabs)[number][0]>("profile");
   const [picture,setPicture]=useState("");
   const [uploading,setUploading]=useState(false);
@@ -291,10 +293,10 @@ function UserSettings({person,prefs,limit,save,report,signOut}:{person:Person;pr
   useEffect(()=>()=>{if(picture)URL.revokeObjectURL(picture);},[picture]);
   return <form className="settings-form settings-tabs" onInvalidCapture={()=>setTab("profile")} onSubmit={async(e)=>{
     e.preventDefault();
-    try{await request("profile",{name,status,prefs:{...form,joinAnnouncements:cleanAnnouncements(form.joinAnnouncements)}});save();}catch(e){report((e as Error).message);}
+    try{await request("profile",{...(localAuth?{}:{name}),status,prefs:{...form,joinAnnouncements:cleanAnnouncements(form.joinAnnouncements)}});save();}catch(e){report((e as Error).message);}
   }}>
     <nav className="tabs" role="tablist" aria-label="Settings sections">{settingsTabs.map(([id,label])=><button type="button" role="tab" key={id} aria-selected={tab===id} className={tab===id?"active":""} onClick={()=>setTab(id)}>{label}</button>)}</nav>
-    <fieldset hidden={tab!=="profile"}><legend>Profile</legend><label>Display name<input required maxLength={40} value={name} onChange={e=>setName(e.target.value)}/></label>
+    <fieldset hidden={tab!=="profile"}><legend>Profile</legend>{localAuth?<p>Display name: {person.username}</p>:<label>Display name<input autoComplete="off" required maxLength={40} value={name} onChange={e=>setName(e.target.value)}/></label>}
       <label>Status<select value={status} onChange={e=>setStatus(e.target.value)}>{statuses.map(([s,label])=><option value={s} key={s}>{label}</option>)}</select></label>
       <div className="avatar-picker"><span className="avatar-large">{picture?<img src={picture} alt=""/>:<Avatar name={name||person.name} uid={person.id} has={person.avatar}/>}</span>
         <div><b>Profile picture</b><small>PNG, JPEG, WebP or GIF.</small></div>
@@ -316,15 +318,15 @@ function UserSettings({person,prefs,limit,save,report,signOut}:{person:Person;pr
       <div className="inline"><button type="button" onClick={()=>{if(testing.current){endTest();setTest("");}else void testMic();}}>{test.startsWith("Playing")?"Stop test":"Test microphone"}</button><span>{test}</span></div>
     </fieldset>
     <fieldset hidden={tab!=="screen"}><legend>Screen sharing</legend>
-      <label>Quality profile<select value={form.screenQuality==="custom"||form.screenQuality==="maximum"?form.screenQuality:"smooth"} onChange={e=>change("screenQuality",e.target.value==="custom"||e.target.value==="maximum"?e.target.value:"smooth")}><option value="smooth">Smooth · 1080p up to 144 FPS</option><option value="maximum">Sharpest · native resolution</option><option value="custom">Custom</option></select></label>
+      <label>Quality profile<select value={form.screenQuality==="custom"||form.screenQuality==="maximum"?form.screenQuality:"smooth"} onChange={e=>change("screenQuality",e.target.value==="custom"||e.target.value==="maximum"?e.target.value:"smooth")}><option value="smooth">Smooth · 1080p 60 FPS</option><option value="maximum">Sharpest · native resolution</option><option value="custom">Custom</option></select></label>
       {form.screenQuality==="custom"?<>
         <label>Capture resolution and frame rate<select value={form.resolution} onChange={e=>change("resolution",e.target.value)}>{qualities.map(q=><option key={q} value={q}>{q.replace("2160","4K").replace("x"," · ")+" FPS"}</option>)}</select></label>
         <label>Bitrate ceiling (Kbps)<input aria-describedby="bitrate-help" type="number" min={0} max={limit||4294967} placeholder="No personal cap" value={form.bitrate||""} onChange={e=>change("bitrate",+e.target.value)}/></label>
         <small id="bitrate-help">Leave blank for no personal bitrate cap.</small>
         <label>Codec preference<select value={form.codec} onChange={e=>change("codec",e.target.value)}><option value="auto">Automatic</option>{typeof RTCRtpSender!=="undefined"&&codecs().map(c=><option key={c}>{c}</option>)}</select></label>
         <label>Streaming mode<select value={form.mode} onChange={e=>change("mode",e.target.value)}><option value="motion">Gaming · motion clarity</option><option value="detail">Desktop · text clarity</option></select></label>
-      </>:form.screenQuality==="maximum"?<p>Captures at your monitor’s native resolution and refresh rate and keeps text sharp. Under load it drops frames rather than resolution.</p>
-      :<p>Captures at 1080p and up to 144 FPS, prefers a hardware encoder, and keeps the frame rate steady. Under load it lowers resolution rather than frames. Each viewer needs its own upload of about 25 Mbps.</p>}
+      </>:form.screenQuality==="maximum"?<p>Captures at your monitor’s native resolution at up to 60 FPS and keeps text sharp. Under load it drops frames rather than resolution.</p>
+      :<p>Captures at 1080p 60 FPS, prefers a hardware encoder, and keeps the frame rate steady so your game keeps its frames. If your PC runs short, it steps down to 45 or 30 FPS on its own. Under load it lowers resolution rather than frames. Each viewer needs its own upload of about 10 Mbps. For 120 or 144 FPS, choose Custom.</p>}
       {limit>0&&<small>Community bitrate ceiling {limit.toLocaleString()} Kbps.</small>}
     </fieldset>
     <fieldset hidden={tab!=="app"}><legend>Appearance and notifications</legend><label className="inline"><input type="checkbox" checked={form.compact} onChange={e=>change("compact",e.target.checked)}/>Compact messages</label>
@@ -346,7 +348,7 @@ function UserSettings({person,prefs,limit,save,report,signOut}:{person:Person;pr
     <footer className="save-bar"><span>{dirty?"You have unsaved changes.":""}</span><a href="/privacy">Privacy</a><button className="primary" disabled={!dirty}>Save changes</button></footer>
   </form>;
 }
-export default function Community(){
+export default function Community({localAuth=false}:{localAuth?:boolean}={}){
   const [auth,setAuth]=useState<Auth|null>(null);
   const [space,setSpace]=useState<Workspace|null>(null);
   const [server,setServer]=useState("community");
@@ -625,6 +627,13 @@ export default function Community(){
   };});
   const [dropRoom,setDropRoom]=useState("");
   // Only people you may move can be dragged, and only onto voice rooms of the same server.
+  const [moderating,setModerating]=useState("");
+  // Timeouts count down against this clock, which ticks every 15 seconds.
+  const [clock,setClock]=useState(()=>Date.now());
+  useEffect(()=>{const timer=setInterval(()=>setClock(Date.now()),15000);return ()=>clearInterval(timer);},[]);
+  // Right-clicking someone in a voice room, or "Moderate" in the member list, opens their member actions.
+  const manage=(uid:string)=>{if(uid!==person?.id){setModerating(uid);setModal("moderate");}};
+  const timeoutOf=(uid:string,serverId=server)=>space?.timeouts?.find(t=>t.uid===uid&&t.server===serverId&&t.timeout>clock)?.timeout;
   const canMove=(c:Channel)=>c.kind==="voice"&&!!c.server&&!!space?.moderates?.includes(c.server);
   async function moveMember(uid:string,room:Channel){
     try{
@@ -646,7 +655,7 @@ export default function Community(){
     event.preventDefault();
     const data=new FormData(event.currentTarget);
     try{
-      const result=await request<Auth>("enroll",Object.fromEntries(data.entries()));
+      const result=await request<Auth>("enroll",localAuth?{}:Object.fromEntries(data.entries()));
       setAuth(result);
     }catch(e){report((e as Error).message);}
   }
@@ -782,8 +791,8 @@ export default function Community(){
   }
   if(!auth?.active){
     return <main className="entry"><section className="entry-card"><span className="brand-mark">R</span><h1>RaRRcord</h1>
-      {!auth?<p>{toast||"Checking your ChatGPT session…"}</p>:!person?
-        <><p>Set up your profile to request access to the community.</p><form className="settings-form" onSubmit={enroll}><label>Username<input name="username" required minLength={3} maxLength={24} pattern="[A-Za-z0-9_]+" autoComplete="username"/></label><label>Display name<input name="name" required maxLength={40}/></label><label>Invitation code (optional)<input name="invite" maxLength={64} autoComplete="off"/></label><button className="primary">Continue</button></form></>:
+      {!auth?<p>{toast||"Checking your session…"}</p>:!person?
+        <><p>Set up your profile to request access to the community.</p><form className="settings-form" onSubmit={enroll} autoComplete="off">{localAuth?<p>Your sign-in username will be your public display name.</p>:<><label>Username<input name="username" required minLength={3} maxLength={24} pattern="[A-Za-z0-9_]+" autoComplete="username"/></label><label>Display name<input name="name" autoComplete="off" required maxLength={40}/></label><label>Invitation code (optional)<input name="invite" maxLength={64} autoComplete="off"/></label></>}<button className="primary">Continue</button></form></>:
         person.state==="approved"?<><p>Continue to your RaRRcord session.</p><form onSubmit={enroll}><button className="primary">Continue</button></form></>:
         <><h2>{person.state==="pending"?"Approval pending":"Account unavailable"}</h2><p>{person.state==="pending"?"A community administrator needs to approve your request.":"Contact your community administrator to check your access."}</p><button onClick={refreshAuth}>Check status</button></>}
       {toast&&auth&&<div role="status" className="form-error">{toast}</div>}
@@ -803,13 +812,17 @@ export default function Community(){
     return rooms.filter(r=>r.channel===id).map(r=>({uid:r.uid,name:r.name,avatar:!!r.has_avatar,live:!!r.screen,cam:!!r.cam,speaking:false})).sort((a,b)=>a.name.localeCompare(b.name)||a.uid.localeCompare(b.uid));
   };
   const currentServer=space?.servers.find(s=>s.id===server);
+  // Direct messages belong to no server, so they keep the plain chat colour.
+  const backdrop=channel?.kind==="dm"?undefined:serverBackground(currentServer);
+  const myTimeout=chatChannel?.server&&person?timeoutOf(person.id,chatChannel.server):undefined;
   const callTitle=space?.channels.find(c=>c.id===call?.channel)?.name;
   const feeds=call?.feeds.filter(f=>f.kind!=="voice")??[];
   const screens=feeds.filter(f=>f.kind==="screen");
   // Sort call tiles by name and stable identifiers so speaking does not move them.
   const stagePeople=call?[...call.participants].sort((a,b)=>a.name.localeCompare(b.name)||a.uid.localeCompare(b.uid)||a.peer.localeCompare(b.peer)):[];
   const ownCam=call?.local.get("cam");
-  const ownScreen=screenPreview?call?.local.get("screen"):undefined;
+  // The self preview plays a low-rate copy, so it costs your PC little while you game.
+  const ownScreen=screenPreview?call?.screenPreview??call?.local.get("screen"):undefined;
   // Volumes are saved per user, so a peer (one join of a call) is looked up to its user first.
   const uidOf=(peer:string)=>call?.participants.find(p=>p.peer===peer)?.uid??peer;
   const voiceVolume=(peer:string)=>volumes[uidOf(peer)]??1;
@@ -834,7 +847,7 @@ export default function Community(){
         {!space&&<div className="skeleton-list" aria-label="Loading channels">{[60,75,50,0,55,70].map((w,i)=>w?<span key={i} className="skeleton" style={{width:w+"%"}}/>:<br key={i}/>)}</div>}
         {groups.map(group=><details key={group} open><summary><ChevronDown size={14}/>{group}</summary>{channels.filter(c=>(c.category||"Channels")===group).map(c=><Fragment key={c.id}><button className={"channel "+(selected===c.id?"selected":"")+(dropRoom===c.id?" drop-target":"")} onClick={()=>choose(c)} {...(c.kind==="voice"?dropProps(c):undefined)}>
           {c.kind==="voice"?<AudioLines size={17}/>:c.kind==="private"?<LockKeyhole size={15}/>:<Hash size={17}/>}<span>{c.name}</span>{c.unread>0&&chatId!==c.id&&<b className="badge">{c.unread>99?"99+":c.unread}</b>}{call?.channel===c.id&&<i className="voice-dot"/>}
-        </button>{c.kind==="voice"&&<VoiceMembers members={membersOf(c.id)} movable={canMove(c)} dropProps={dropProps(c)}/>}</Fragment>)}</details>)}
+        </button>{c.kind==="voice"&&<VoiceMembers members={membersOf(c.id)} movable={canMove(c)} dropProps={dropProps(c)} manage={canMove(c)?manage:undefined}/>}</Fragment>)}</details>)}
         <button className="channel dm-button" onClick={()=>{setDmUsers([]);setModal("dm");}}><Plus size={16}/><span>New direct message</span></button>
       </div>
       {call&&<div className="voice-status"><div><b><i className="voice-dot"/> Voice connected</b><span>{callTitle}</span></div>
@@ -851,7 +864,7 @@ export default function Community(){
         <IconButton label="User settings" onClick={()=>setModal("settings")}><Settings size={18}/></IconButton>
       </footer>
     </aside>
-    <main className="conversation">
+    <main className={"conversation"+(backdrop?" has-backdrop":"")} style={backdrop?{background:backdrop}:undefined}>
       <header className="topbar">
         <span className="mobile-toggle"><IconButton label="Toggle navigation" active={mobile} onClick={()=>{setMembersSheet(false);setMobile(!mobile);}}><Menu size={20}/></IconButton></span>
         <div className="location-title">{mainStage?<AudioLines size={21}/>:<Hash size={22}/>}<h1>{mainStage?callTitle??channel?.name??"Voice room":channel?.name??"Community"}</h1></div>
@@ -942,7 +955,7 @@ export default function Community(){
               const file=event.currentTarget.files?.[0];event.currentTarget.value="";if(file)selectGif(file);
             }}/>
             <IconButton label="Attach file" onClick={()=>upload.current?.click()}><Paperclip size={20}/></IconButton>
-            <textarea ref={draftInput} rows={1} maxLength={8000} value={draft} placeholder={"Message "+chatChannel.name} aria-label={"Message "+chatChannel.name} onChange={event=>changeDraft(event.target.value)} onPaste={pasteGif} onKeyDown={e=>{
+            <textarea ref={draftInput} rows={1} maxLength={8000} value={draft} disabled={!!myTimeout} placeholder={myTimeout?"You are timed out in this server for "+timeLeft(myTimeout-clock)+".":"Message "+chatChannel.name} aria-label={"Message "+chatChannel.name} onChange={event=>changeDraft(event.target.value)} onPaste={pasteGif} onKeyDown={e=>{
               if(e.nativeEvent.isComposing)return;
               if(e.key==="Enter"&&!e.shiftKey){e.preventDefault();e.currentTarget.form?.requestSubmit();}
               else if(e.key==="Escape"&&(edit||reply)&&!picker){e.preventDefault();if(edit)setDraft("");setEdit(null);setReply(null);}
@@ -960,16 +973,25 @@ export default function Community(){
     </main>
     {members&&<aside className="members-pane"><div className="members-title"><h2>Members</h2><span>{space?.people.length??""}</span></div>
       {!space&&<div className="skeleton-list members-skel" aria-label="Loading members">{[55,70,45,60].map((w,i)=><div key={i}><span className="skeleton avatar-skel"/><span className="skeleton" style={{width:w+"%"}}/></div>)}</div>}
-      {["online","offline"].map(group=><section key={group}><h3>{group==="online"?"Available":"Offline"}</h3>{space?.people.filter(p=>group==="offline"?p.status==="offline":p.status!=="offline").map(p=><details className="member" key={p.id}><summary><Avatar name={p.name} uid={p.id} has={p.avatar} status={p.status}/><span><b>{p.name}</b><small>@{p.username}{p.role==="admin"?" · Admin":""}</small></span></summary>
-        {p.id!==person?.id&&<div className="member-menu"><button onClick={()=>{setDmUsers([p.id]);setModal("dm");}}>Message</button><button onClick={async()=>{try{await request("block",{users:[p.id]});report("Member blocked.");}catch(e){report((e as Error).message);}}}>Block</button><button onClick={()=>void request("block",{users:[p.id],remove:true}).then(()=>report("Member unblocked.")).catch(e=>report(e.message))}>Unblock</button></div>}
+      {["online","offline"].map(group=><section key={group}><h3>{group==="online"?"Available":"Offline"}</h3>{space?.people.filter(p=>group==="offline"?p.status==="offline":p.status!=="offline").map(p=><details className="member" key={p.id}><summary><Avatar name={p.name} uid={p.id} has={p.avatar} status={p.status}/><span><b>{p.name}</b><small>@{p.username}{p.role==="admin"?" · Admin":""}{timeoutOf(p.id)?" · Timed out":""}</small></span></summary>
+        {p.id!==person?.id&&<div className="member-menu"><button onClick={()=>{setDmUsers([p.id]);setModal("dm");}}>Message</button><button onClick={async()=>{try{await request("block",{users:[p.id]});report("Member blocked.");}catch(e){report((e as Error).message);}}}>Block</button><button onClick={()=>void request("block",{users:[p.id],remove:true}).then(()=>report("Member unblocked.")).catch(e=>report(e.message))}>Unblock</button>{space?.moderates?.includes(server)&&p.role!=="admin"&&<button onClick={()=>manage(p.id)}>Moderate</button>}</div>}
       </details>)}</section>)}
     </aside>}
     {sheetOpen&&<div className="scrim" aria-hidden="true" onClick={()=>{setMobile(false);setMembersSheet(false);}}/>}
     <div className="toast-region" role="status" aria-live="polite">{toast&&<div className="toast">{toast}<IconButton label="Dismiss" onClick={()=>setToast("")}><X size={16}/></IconButton></div>}</div>
     <ConfirmHost/>
-    {modal&&<Modal key={modal} wide={modal==="admin"} className={modal==="switch"?"switch-dialog":""} onClose={()=>setModal("")} title={({admin:"Administration",settings:"User settings",diagnostics:"Connection diagnostics",dm:"Direct message",help:"RaRRcord help",switch:"Jump to"} as Record<string,string>)[modal]}>
-      {modal==="settings"&&person&&<><UserSettings person={person} prefs={prefs} limit={limit} save={()=>{void refresh();void refreshAuth();setModal("");report(call?"Settings saved. Rejoin the call to apply media changes.":"Settings saved.");}} report={report} signOut={logout}/></>}
+    {modal&&<Modal key={modal} wide={modal==="admin"} className={modal==="switch"?"switch-dialog":""} onClose={()=>setModal("")} title={modal==="moderate"?"Moderate "+(space?.people.find(p=>p.id===moderating)?.name??"member"):({admin:"Administration",settings:"User settings",diagnostics:"Connection diagnostics",dm:"Direct message",help:"RaRRcord help",switch:"Jump to"} as Record<string,string>)[modal]}>
+      {modal==="settings"&&person&&<><UserSettings localAuth={localAuth} person={person} prefs={prefs} limit={limit} save={()=>{void refresh();void refreshAuth();setModal("");report(call?"Settings saved. Rejoin the call to apply media changes.":"Settings saved.");}} report={report} signOut={logout}/></>}
       {modal==="diagnostics"&&<Diagnostics call={call} latency={latency} errors={errors}/>}
+      {modal==="moderate"&&space&&(()=>{
+        const target=space.people.find(p=>p.id===moderating);
+        if(!target)return <p>That member is no longer available.</p>;
+        const voiceRooms=space.channels.filter(c=>c.server===server&&c.kind==="voice");
+        const room=call?.participants.some(p=>p.uid===target.id)&&call.channel&&voiceRooms.some(r=>r.id===call.channel)?call.channel:rooms.find(r=>r.uid===target.id&&voiceRooms.some(v=>v.id===r.channel))?.channel;
+        return <ModerateMember person={target} server={server} serverName={currentServer?.name??"this server"} rooms={voiceRooms} room={room} until={timeoutOf(target.id)} now={clock}
+          canMove={!!space.moderates?.includes(server)} move={async r=>{await moveMember(target.id,r);setModal("");}}
+          done={message=>{roomsAt.current=0;void refresh();setModal("");setToast(message);}} report={report}/>;
+      })()}
       {modal==="admin"&&space&&<Admin space={space} server={server} report={report} refresh={refresh}/>}
       {modal==="dm"&&<form className="settings-form" onSubmit={async e=>{e.preventDefault();try{const result=await request<{id:string}>("dm",{users:dmUsers});await refresh();setSelected(result.id);setStage(false);setModal("");}catch(e){report((e as Error).message);}}}>
         {space?.people.filter(p=>p.id!==person?.id).map(p=><label className="inline" key={p.id}><input type="checkbox" checked={dmUsers.includes(p.id)} onChange={e=>setDmUsers(prev=>e.target.checked?[...prev,p.id]:prev.filter(id=>id!==p.id))}/>{p.name}</label>)}

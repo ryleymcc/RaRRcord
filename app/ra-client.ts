@@ -1,8 +1,25 @@
+import {backgroundGradients,type BackgroundGradient} from "../lib/backgrounds.ts";
 export type Person = {id:string; name:string; username:string; avatar?:boolean; role:string; state?:string; status:string};
 export type Channel = {id:string; server:string|null; kind:string; name:string; category:string; description:string; permission:string; position:number; unread:number;allowed?:string[]};
-export type Server = {id:string; name:string; icon?:string; picture?:string|null};
+export type Server = {id:string; name:string; icon?:string; picture?:string|null; background?:string|null; background_fill?:string; background_dim?:number};
 // The version tag changes whenever the picture does, so a new upload is not hidden by the browser cache.
 export const serverPictureUrl=(id:string,version:string)=>"/api/ra/servericon?key="+encodeURIComponent(id)+"&v="+encodeURIComponent(version);
+export const serverBackgroundUrl=(id:string,version:string)=>"/api/ra/serverbackground?key="+encodeURIComponent(id)+"&v="+encodeURIComponent(version);
+// The CSS background for a server's chat area, or undefined when it has none. The chat colour is laid
+// over the image or fill at the chosen strength, so messages stay readable.
+export function serverBackground(server:Pick<Server,"id"|"background"|"background_fill"|"background_dim">|undefined){
+  if(!server)return undefined;
+  const fill=server.background_fill??"";
+  const gradient=fill.startsWith("preset:")?backgroundGradients[fill.slice(7) as BackgroundGradient]:undefined;
+  const colour=/^#[0-9a-f]{6}$/i.test(fill)?fill:undefined;
+  if(!server.background&&!gradient&&!colour)return undefined;
+  const dim=Math.min(90,Math.max(0,server.background_dim??60));
+  const veil="rgb(49 51 56 / "+dim+"%)";
+  const layers=["linear-gradient("+veil+","+veil+")"];
+  if(server.background)layers.push('url("'+serverBackgroundUrl(server.id,server.background)+'") center / cover no-repeat');
+  if(gradient)layers.push(gradient);
+  return layers.join(",")+" "+(colour??"var(--base)");
+}
 export type Message = {id:number; uid:string; name:string; username:string; has_avatar:boolean; body:string; created:number; edited?:number; deleted:number; pinned:number; reply?:number; attachment?:string; filename?:string; reactions?:string; my_reactions?:string};
 export type Preferences = {
   input:string; output:string; camera:string; sensitivity:number; noise:boolean; echo:boolean; gain:boolean;

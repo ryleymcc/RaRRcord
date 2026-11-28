@@ -2,6 +2,7 @@ import handler from "vinext/server/fetch-handler";
 import { runWithConnectorBinding } from "../lib/connector-context";
 import type { ConnectorBinding } from "../lib/connector-contract.mjs";
 import { api } from "./ra";
+import { localAuthRoute, localOrigin } from "./local-auth";
 import { authenticate } from "./identity";
 import { newNonce, pagePolicy, secure, withPolicy } from "./security-headers";
 
@@ -13,11 +14,16 @@ const worker = {
       const local = env.RARRCORD_AUTH ? env : { ...env, RARRCORD_AUTH: "sites" };
       return render(await authenticate(request, local), local, ctx);
     }
-    const signedIn = await authenticate(request, env);
     const url = new URL(request.url);
+    if (env.RARRCORD_AUTH === "local" && url.pathname === "/signin-with-chatgpt") {
+      return secure(await localAuthRoute(request, env), pagePolicy(newNonce(), new URL(localOrigin(env) ?? request.url).host));
+    }
+    const signedIn = await authenticate(request, env);
     if (url.pathname.startsWith("/api/ra/")) return secure(await api(signedIn, env));
-    const policy = pagePolicy(newNonce(), url.host);
-    return secure(await render(withPolicy(signedIn, policy), env, ctx), policy);
+    const policy = pagePolicy(newNonce(), new URL(env.RARRCORD_AUTH === "local" ? localOrigin(env) ?? request.url : request.url).host);
+    const response = secure(await render(withPolicy(signedIn, policy), env, ctx), policy);
+    if (env.RARRCORD_AUTH === "local" && response.headers.get("content-type")?.includes("text/html")) response.headers.set("cache-control", "private, no-store");
+    return response;
   },
 };
 
