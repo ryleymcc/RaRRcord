@@ -251,18 +251,30 @@ async function route(request:Request, env:Cloudflare.Env):Promise<Response> {
   if (path==="ice" && !write) {
     const stun=await one<{value:string}>("SELECT value FROM settings WHERE key='stun'");
     const servers:RTCIceServer[]=[{urls:stun?.value || "stun:stun.cloudflare.com:3478"}];
-    if (env.RARRCORD_TURN_BROKER && env.RARRCORD_TURN_TOKEN) {
+    // Cloudflare's TURN service hands out short-lived credentials for its relay. A relay lets calls
+    // hide each person's IP address and connect through strict NATs.
+    const cloudflare=env.RARRCORD_TURN_KEY_ID && env.RARRCORD_TURN_KEY_TOKEN;
+    const broker=cloudflare?"https://rtc.live.cloudflare.com/v1/turn/keys/"+encodeURIComponent(env.RARRCORD_TURN_KEY_ID!)+"/credentials/generate-ice-servers":env.RARRCORD_TURN_BROKER;
+    const secret=cloudflare?env.RARRCORD_TURN_KEY_TOKEN:env.RARRCORD_TURN_TOKEN;
+    let relay=false;
+    if (broker && secret) {
       try {
-        const reply=await fetch(env.RARRCORD_TURN_BROKER,{method:"POST",headers:{authorization:"Bearer "+env.RARRCORD_TURN_TOKEN},signal:AbortSignal.timeout(2500)});
+        const reply=await fetch(broker,{method:"POST",headers:{authorization:"Bearer "+secret,"content-type":"application/json"},body:JSON.stringify({ttl:86400}),signal:AbortSignal.timeout(2500)});
         if (reply.ok) {
-          const data=await reply.json<{iceServers:RTCIceServer[]}>();
-          if (Array.isArray(data?.iceServers)) servers.push(...data.iceServers);
+          const data=await reply.json<{iceServers:RTCIceServer[]|RTCIceServer}>();
+          for (const server of [data?.iceServers ?? []].flat()) {
+            // Browsers block port 53, so those addresses only slow down connection setup.
+            const urls=[server.urls].flat().filter(u=>typeof u==="string" && !/:53(\?|$)/.test(u));
+            if (!urls.length) continue;
+            servers.push({...server,urls});
+            if (urls.some(u=>/^turns?:/.test(u))) relay=true;
+          }
         }
       } catch {
-        console.warn("RaRRcord TURN broker unavailable; using STUN.");
+        console.warn("RaRRcord TURN service unavailable; using STUN.");
       }
     }
-    return json({servers});
+    return json({servers,relay});
   }
   if (path==="transport" && !write) {
     if (request.headers.get("upgrade")?.toLowerCase()!=="websocket") return json({transport:"authenticated polling"});

@@ -116,7 +116,7 @@ export class Call {
     this.refresh(rosterChanged || signals.length>0);
   }
   private create(remote:Participant) {
-    const pc=new RTCPeerConnection({iceServers:this.ice});
+    const pc=new RTCPeerConnection({iceServers:this.ice,iceTransportPolicy:this.prefs.hideIp?"relay":"all"});
     const link:Link={pc,remote,making:false,ignoring:false,answering:false,outgoing:Promise.resolve(),localCandidates:null,candidates:[],senders:new Map(),wanted:new Set(["voice"]),watching:new Set(["voice"]),declined:new Set(),incoming:new Map(),labels:{},speaking:false,previous:new Map(),retry:0};
     this.links.set(remote.peer,link);
     pc.onnegotiationneeded=async()=>{
@@ -482,8 +482,9 @@ export class VoiceSession {
     this.joining=this.joining.then(async()=>{
       try{
         if(this.target!==target)return;
-        const ice=await request<{servers:RTCIceServer[]}>("ice");
+        const ice=await request<{servers:RTCIceServer[];relay?:boolean}>("ice");
         if(this.target!==target)return;
+        if(prefs.hideIp && !ice.relay)throw new Error("Hide my IP needs a TURN relay, and this server has none. Ask an admin to set one up, or turn the setting off in User settings.");
         this.closeCall();
         const call=new Call(channel,prefs,limit,ice.servers,this.updated,this.error);
         try{
