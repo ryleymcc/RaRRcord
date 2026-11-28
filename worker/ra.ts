@@ -4,7 +4,7 @@ import { allow, dailyUploadBytes, readLimits } from "./limits.ts";
 type Value = string | number | null;
 type User = { id:string; username:string; name:string; state:string; role:string; status:string; seen:number; avatar:string|null; epoch:number; prefs:string };
 type Channel = { id:string; kind:string; server:string|null; name:string; permission:string; category:string; description:string; position:number };
-type Voice = { uid:string; peer:string; channel:string; expires:number; cam:number; screen:number };
+type Voice = { uid:string; peer:string; channel:string; expires:number; cam:number; screen:number; joined:number };
 type Input = Record<string, unknown>;
 
 const day = 86400000;
@@ -192,7 +192,7 @@ async function route(request:Request, env:Cloudflare.Env):Promise<Response> {
     return json({
       servers:await all("SELECT * FROM servers s WHERE ?='admin' OR EXISTS (SELECT 1 FROM members WHERE server=s.id AND uid=?) ORDER BY name",account.role,id),
       channels:await all("SELECT c.*, (SELECT COUNT(*) FROM messages m WHERE m.channel=c.id AND m.deleted=0 AND m.uid<>? AND m.id>COALESCE((SELECT mid FROM reads WHERE uid=? AND channel=c.id),0)) unread FROM channels c WHERE "+channelAccess("c")+" ORDER BY position,c.name",id,id,...access),
-      people:await all("SELECT u.id,u.name,u.username,u.role,u.avatar IS NOT NULL AS avatar,CASE WHEN u.seen<? THEN 'offline' ELSE u.status END status FROM users u WHERE u.state='approved' AND (u.id=? OR ?='admin' OR EXISTS (SELECT 1 FROM members a JOIN members b ON a.server=b.server WHERE a.uid=? AND b.uid=u.id)) ORDER BY u.name",now-25000,id,account.role,id),
+      people:await all("SELECT u.id,u.name,u.username,u.role,u.avatar IS NOT NULL AS avatar,CASE WHEN u.seen<? THEN 'offline' ELSE u.status END status FROM users u WHERE u.state='approved' AND (u.id=? OR ?='admin' OR EXISTS (SELECT 1 FROM members a JOIN members b ON a.server=b.server WHERE a.uid=? AND b.uid=u.id)) ORDER BY u.name COLLATE NOCASE,u.id",now-25000,id,account.role,id),
       settings:await all("SELECT key,value FROM settings WHERE key IN ('bitrate','upload','stun')"),
       prefs:JSON.parse(account.prefs),
       // Servers where this account may move people between voice rooms.
@@ -240,7 +240,7 @@ async function route(request:Request, env:Cloudflare.Env):Promise<Response> {
       const statements=[
         // A just-joined sender must be visible in the roster for its signal to be processed.
         sql("SELECT id,sender,data FROM signals WHERE channel=? AND recipient=? AND id>? AND expires>? ORDER BY id LIMIT 100",room.channel,peer,number(q.get("signal")),now),
-        sql("SELECT v.peer,v.uid,v.cam,v.screen,u.name FROM voice v JOIN users u ON v.uid=u.id JOIN channels c ON v.channel=c.id WHERE v.channel=? AND v.expires>? AND v.peer NOT LIKE 'moved:%' AND u.state='approved' AND "+channelAccess("c").replace("ca.uid=?","ca.uid=v.uid").replace("?='admin'","u.role='admin'").replace("ma.uid=?","ma.uid=v.uid")+" AND NOT EXISTS (SELECT 1 FROM blocks b WHERE (b.uid=? AND b.blocked=v.uid) OR (b.uid=v.uid AND b.blocked=?))",room.channel,now,id,id),
+        sql("SELECT v.peer,v.uid,v.cam,v.screen,u.name FROM voice v JOIN users u ON v.uid=u.id JOIN channels c ON v.channel=c.id WHERE v.channel=? AND v.expires>? AND v.peer NOT LIKE 'moved:%' AND u.state='approved' AND "+channelAccess("c").replace("ca.uid=?","ca.uid=v.uid").replace("?='admin'","u.role='admin'").replace("ma.uid=?","ma.uid=v.uid")+" AND NOT EXISTS (SELECT 1 FROM blocks b WHERE (b.uid=? AND b.blocked=v.uid) OR (b.uid=v.uid AND b.blocked=?)) ORDER BY v.joined,u.name COLLATE NOCASE,v.uid",room.channel,now,id,id),
       ];
       // The lease lasts 16 s; renewing once it is under 10 s saves a write on most polls.
       if (room.expires-now<lease-6000) statements.push(sql("UPDATE voice SET expires=? WHERE uid=? AND peer=?",now+lease,id,peer));
@@ -251,7 +251,7 @@ async function route(request:Request, env:Cloudflare.Env):Promise<Response> {
     const rooms=async ()=>{
       if (!q.has("rooms")) return;
       // Everyone currently in a voice room this viewer can see, for the channel sidebar.
-      result.rooms=await all("SELECT v.channel,v.uid,u.name,u.avatar IS NOT NULL AS has_avatar,v.cam,v.screen FROM voice v JOIN users u ON v.uid=u.id JOIN channels c ON v.channel=c.id WHERE v.expires>? AND u.state='approved' AND c.kind='voice' AND "+channelAccess("c")+" AND "+channelAccess("c").replace("ca.uid=?","ca.uid=v.uid").replace("?='admin'","u.role='admin'").replace("ma.uid=?","ma.uid=v.uid")+" AND NOT EXISTS (SELECT 1 FROM blocks b WHERE (b.uid=? AND b.blocked=v.uid) OR (b.uid=v.uid AND b.blocked=?)) ORDER BY u.name",now,...access,id,id);
+      result.rooms=await all("SELECT v.channel,v.uid,u.name,u.avatar IS NOT NULL AS has_avatar,v.cam,v.screen FROM voice v JOIN users u ON v.uid=u.id JOIN channels c ON v.channel=c.id WHERE v.expires>? AND u.state='approved' AND c.kind='voice' AND "+channelAccess("c")+" AND "+channelAccess("c").replace("ca.uid=?","ca.uid=v.uid").replace("?='admin'","u.role='admin'").replace("ma.uid=?","ma.uid=v.uid")+" AND NOT EXISTS (SELECT 1 FROM blocks b WHERE (b.uid=? AND b.blocked=v.uid) OR (b.uid=v.uid AND b.blocked=?)) ORDER BY v.joined,u.name COLLATE NOCASE,v.uid",now,...access,id,id);
     };
     await Promise.all([seen,chat(),call(),rooms()]);
     return json(result);
@@ -498,7 +498,9 @@ async function route(request:Request, env:Cloudflare.Env):Promise<Response> {
       await throttle("join",15);
       const count=await one<{count:number}>("SELECT COUNT(*) count FROM voice WHERE channel=? AND expires>? AND uid<>?",room.id,now,id);
       if ((count?.count??0)>=6) deny(409,"This room already has six peers.");
-      await run("INSERT INTO voice(uid,channel,peer,expires) VALUES(?,?,?,?) ON CONFLICT(uid) DO UPDATE SET channel=excluded.channel,peer=excluded.peer,expires=excluded.expires,cam=0,screen=0",id,room.id,peer,now+lease);
+      // joined orders the room's roster and tiles. A reconnect into the same room keeps its place;
+      // a new room, a lapsed lease or a rejoin after being moved ("moved:" peer) starts at the end.
+      await run("INSERT INTO voice(uid,channel,peer,expires,joined) VALUES(?,?,?,?,?) ON CONFLICT(uid) DO UPDATE SET joined=CASE WHEN voice.channel=excluded.channel AND voice.expires>excluded.joined AND voice.peer NOT LIKE 'moved:%' THEN voice.joined ELSE excluded.joined END,channel=excluded.channel,peer=excluded.peer,expires=excluded.expires,cam=0,screen=0",id,room.id,peer,now+lease,now);
       return json({});
     }
     const current=await one<Voice>("SELECT * FROM voice WHERE channel=? AND uid=? AND peer=? AND expires>?",room.id,id,peer,now);
