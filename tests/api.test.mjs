@@ -28,22 +28,29 @@ function fixture() {
   const BUCKET={
     async put(key,data,{httpMetadata}){objects.set(key,{body:await new Response(data).arrayBuffer(),httpMetadata});},
     async get(key){return objects.get(key);},
-    async delete(key){objects.delete(key);},
+    async delete(key){for(const k of [key].flat())objects.delete(k);},
   };
   const origin="https://ra.example";
   const env={DB,BUCKET,RARRCORD_OWNER_EMAIL:"owner@example.test"};
   function visitor(id,email=id+"@example.test") {
     let cookie="";
-    return async (path,{input,expect=200,otherOrigin,keepCookie=true,contentType}={})=>{
+    return async (path,{input,expect=200,otherOrigin,keepCookie=true,contentType,noLength}={})=>{
       const headers=new Headers();
-      if(id){headers.set("oai-authenticated-user-id",id);headers.set("oai-authenticated-user-email",email);}
+      if(id){headers.set("x-rarrcord-user-id",id);headers.set("x-rarrcord-user-email",email);}
       if(cookie&&keepCookie)headers.set("cookie",cookie);
       if(input!==undefined){
         headers.set("origin",otherOrigin??origin);
         if(!(input instanceof FormData))headers.set("content-type","application/json");
       }
-      const result=await api(new Request(origin+"/api/ra/"+path,{method:input===undefined?"GET":"POST",headers,
-        body:input===undefined||input instanceof FormData?input:JSON.stringify(input)}),env);
+      let payload=input===undefined||input instanceof FormData?input:JSON.stringify(input);
+      if(input instanceof FormData){
+        // Browsers send a length with multipart uploads; Request objects built here do not.
+        const encoded=new Response(input);
+        headers.set("content-type",encoded.headers.get("content-type"));
+        payload=await encoded.arrayBuffer();
+        if(!noLength)headers.set("content-length",String(payload.byteLength));
+      }
+      const result=await api(new Request(origin+"/api/ra/"+path,{method:input===undefined?"GET":"POST",headers,body:payload}),env);
       if(contentType)assert.equal(result.headers.get("content-type"),contentType);
       const received=result.headers.get("set-cookie");
       if(received){
@@ -55,7 +62,7 @@ function fixture() {
       return body;
     };
   }
-  return {visitor};
+  return {visitor,objects};
 }
 
 test("independent app sessions enforce approval, origin, ownership, bans and revocation",async()=>{
@@ -198,4 +205,52 @@ test("voice sidechat persists and shares the room's permissions and polling with
   form.delete("reply");
   form.set("file",new File(["not a gif"],"fake.gif"));
   await member("upload",{input:form,expect:415});
+});
+
+test("uploads need a length and count toward a daily allowance, and read routes are rate limited",async()=>{
+  const {visitor}=fixture();
+  const owner=visitor("limits-owner","owner@example.test");
+  await owner("enroll",{input:{username:"limitsowner"}});
+  const png=()=>{const form=new FormData();form.set("channel","general");form.set("file",new File([new Uint8Array([137,80,78,71,13,10,26,10,0,0])],"a.png"));return form;};
+  await owner("upload",{input:png(),noLength:true,expect:411});
+  await owner("upload",{input:png()});
+  for(let i=0;i<10;i++)await owner("ice");
+  await owner("ice",{expect:429});
+});
+
+test("names cannot hide characters or copy another member, and group DMs respect blocks",async()=>{
+  const {visitor}=fixture();
+  const owner=visitor("owner"), a=visitor("a"), b=visitor("b");
+  await owner("enroll",{input:{username:"owner",name:"Alek"}});
+  await a("enroll",{input:{username:"alek",name:"x"},expect:409});
+  await a("enroll",{input:{username:"aaa",name:"alek"},expect:409});
+  await a("enroll",{input:{username:"aaa",name:"A\u202eli\u200bce"}});
+  await b("enroll",{input:{username:"bbb"}});
+  for(const [id,client] of [["a",a],["b",b]]){await owner("admin",{input:{action:"account",target:id,state:"approved",role:"member"}});await client("enroll",{input:{}});}
+  const people=(await owner("workspace")).people;
+  assert.equal(people.find(p=>p.id==="a").name,"Alice");
+  await b("profile",{input:{name:"ALEK",status:"online"},expect:409});
+  await b("profile",{input:{name:"Bob",status:"online"}});
+  await b("block",{input:{users:["a"]}});
+  await owner("dm",{input:{users:["a","b"]},expect:403});
+  const {id:dm}=await owner("dm",{input:{users:["a"]}});
+  await owner("message",{input:{channel:dm,text:"hi"}});
+  const mid=(await a("history?channel="+dm)).messages[0].id;
+  await a("block",{input:{users:["owner"]}});
+  await a("message",{input:{channel:dm,id:mid,action:"react",emoji:"👍"},expect:403});
+});
+
+test("deleting a channel or server removes its messages and files",async()=>{
+  const {visitor,objects}=fixture();
+  const owner=visitor("owner");
+  await owner("enroll",{input:{username:"owner"}});
+  const {id:server}=await owner("admin",{input:{action:"server",name:"Temp"}});
+  const {id:channel}=await owner("admin",{input:{action:"channel",server,name:"temp",kind:"text"}});
+  const form=new FormData();form.set("channel",channel);form.set("file",new File(["notes"],"n.txt"));
+  await owner("upload",{input:form});
+  await owner("message",{input:{channel,text:"bye"}});
+  assert.equal(objects.size,1);
+  await owner("admin",{input:{action:"server_delete",target:server}});
+  assert.equal(objects.size,0);
+  await owner("history?channel="+channel,{expect:404});
 });

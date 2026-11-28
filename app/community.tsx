@@ -161,7 +161,9 @@ function Diagnostics({call,latency,errors}:{call:Call|null;latency:number|null;e
     {!records.length&&<p>Join a voice room with another participant to measure a peer connection.</p>}
     {records.map(r=><div className="metric-card" key={JSON.stringify([r.peer,r.stream])}><h3>{r.name} · {r.direction}</h3><dl>{[
       ["Connection",r.connection],["ICE",r.ice],["ICE gathering",r.gathering],["Path",r.route??"Unavailable"],["Codec",r.codec??"Unavailable"],
-      ["Resolution",r.resolution??"Unavailable"],["Rate",value(r.fps," FPS")],["Actual bitrate",value(r.bitrate," Kbps")],
+      ["Resolution",r.resolution??"Unavailable"],["Rate",value(r.fps," FPS")],
+      ...(r.direction==="Sending video"?[["Capture rate",value(r.captureFps," FPS")],["Encoder",r.encoder??"Unavailable"]]:[]),
+      ...(r.direction==="Receiving video"?[["Decoder",r.decoder??"Unavailable"]]:[]),["Actual bitrate",value(r.bitrate," Kbps")],
       ...(r.direction==="Sending video"?[["Encoder target",value(r.targetBitrate," Kbps")]]:[]),
       ["Round trip",value(r.rtt," ms")],
       ["Packet loss",value(r.loss,"%")],["Jitter",value(r.jitter," ms")],["Frames dropped",value(r.dropped)],["Frames encoded",value(r.encoded)],["Frames decoded",value(r.decoded)],
@@ -253,14 +255,15 @@ function UserSettings({person,prefs,limit,save,report,signOut}:{person:Person;pr
       <div className="inline"><button type="button" onClick={()=>{if(testing.current){endTest();setTest("");}else void testMic();}}>{test.startsWith("Playing")?"Stop test":"Test microphone"}</button><span>{test}</span></div>
     </fieldset>
     <fieldset hidden={tab!=="screen"}><legend>Screen sharing</legend>
-      <label>Quality profile<select value={form.screenQuality} onChange={e=>change("screenQuality",e.target.value==="custom"?"custom":"maximum")}><option value="maximum">Highest quality</option><option value="custom">Custom</option></select></label>
-      {form.screenQuality==="maximum"?<p>Captures at native resolution and asks for the highest available frame rate. WebRTC adapts compression and frame rate during the call.</p>:<>
+      <label>Quality profile<select value={form.screenQuality==="custom"||form.screenQuality==="maximum"?form.screenQuality:"smooth"} onChange={e=>change("screenQuality",e.target.value==="custom"||e.target.value==="maximum"?e.target.value:"smooth")}><option value="smooth">Smooth · 1080p up to 144 FPS</option><option value="maximum">Sharpest · native resolution</option><option value="custom">Custom</option></select></label>
+      {form.screenQuality==="custom"?<>
         <label>Capture resolution and frame rate<select value={form.resolution} onChange={e=>change("resolution",e.target.value)}>{qualities.map(q=><option key={q} value={q}>{q.replace("2160","4K").replace("x"," · ")+" FPS"}</option>)}</select></label>
         <label>Bitrate ceiling (Kbps)<input aria-describedby="bitrate-help" type="number" min={0} max={limit||4294967} placeholder="No personal cap" value={form.bitrate||""} onChange={e=>change("bitrate",+e.target.value)}/></label>
         <small id="bitrate-help">Leave blank for no personal bitrate cap.</small>
         <label>Codec preference<select value={form.codec} onChange={e=>change("codec",e.target.value)}><option value="auto">Automatic</option>{typeof RTCRtpSender!=="undefined"&&codecs().map(c=><option key={c}>{c}</option>)}</select></label>
         <label>Streaming mode<select value={form.mode} onChange={e=>change("mode",e.target.value)}><option value="motion">Gaming · motion clarity</option><option value="detail">Desktop · text clarity</option></select></label>
-      </>}
+      </>:form.screenQuality==="maximum"?<p>Captures at your monitor’s native resolution and refresh rate and keeps text sharp. Under load it drops frames rather than resolution.</p>
+      :<p>Captures at 1080p and up to 144 FPS, prefers a hardware encoder, and keeps the frame rate steady. Under load it lowers resolution rather than frames. Each viewer needs its own upload of about 25 Mbps.</p>}
       {limit>0&&<small>Community bitrate ceiling {limit.toLocaleString()} Kbps.</small>}
     </fieldset>
     <fieldset hidden={tab!=="app"}><legend>Appearance and notifications</legend><label className="inline"><input type="checkbox" checked={form.compact} onChange={e=>change("compact",e.target.checked)}/>Compact messages</label>
@@ -496,7 +499,7 @@ export default function Community(){
   }
   const join=(c:Channel)=>voice.join(c.id,prefs,limit);
   async function logout(){
-    try{await request("logout",{});voice.disconnect();location.assign("/signout-with-chatgpt?return_to=%2F");}
+    try{const {signOut}=await request<{signOut?:string}>("logout",{});voice.disconnect();location.assign(signOut??"/signout-with-chatgpt?return_to=%2F");}
     catch(e){report((e as Error).message);}
   }
   async function enroll(event:FormEvent<HTMLFormElement>){
