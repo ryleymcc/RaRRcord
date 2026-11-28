@@ -138,6 +138,70 @@ test("message changes, private uploads and voice signaling stay inside authorize
   assert.deepEqual((await owner("poll?rooms=1")).rooms.map(r=>r.uid),["second"]);
 });
 
+test("reply previews and links resolve beyond the first page and respect channel access",async()=>{
+  const {visitor,env}=fixture();
+  const owner=visitor("owner"), member=visitor("member");
+  await owner("enroll",{input:{username:"owner"}});
+  await member("enroll",{input:{username:"member",name:"Member"}});
+  await owner("admin",{input:{action:"account",target:"member",state:"approved",role:"member"}});
+  await member("enroll",{input:{}});
+  await owner("message",{input:{channel:"general",text:"Original"}});
+  const original=(await member("history?channel=general")).messages[0];
+  for(let i=0;i<55;i++){
+    await env.DB.prepare("INSERT INTO messages(channel,uid,body,created) VALUES(?,?,?,?)").bind("general","owner","Intervening message",Date.now()).run();
+  }
+  const before=await owner("history?channel=general");
+  await member("message",{input:{channel:"general",reply:original.id,text:"A reply"}});
+  const latest=await owner("history?channel=general");
+  assert.equal(latest.messages.some(m=>m.id===original.id),false);
+  assert.equal(latest.messages.at(-1).replyPreview.body,"Original");
+  const poll=await owner("poll?channel=general&after="+before.cursor);
+  assert.equal(poll.messages[0].replyPreview.uid,"owner");
+  const context=await member("history?channel=general&around="+original.id);
+  assert.equal(context.messages[0].id,original.id);
+  assert.equal(context.messages.length,26);
+  await member("history?channel=announcements&around="+original.id,{expect:404});
+
+  const file=new FormData();
+  file.set("channel","general");
+  file.set("file",new File(["notes"],"notes.txt"));
+  file.set("reply",String(original.id));
+  await member("upload",{input:file});
+  assert.equal((await owner("history?channel=general")).messages.at(-1).reply,original.id);
+  await owner("message",{input:{action:"delete",channel:"general",id:original.id}});
+  assert.equal((await member("history?channel=general")).messages.at(-1).replyPreview,null);
+  await member("history?channel=general&around="+original.id,{expect:404});
+});
+
+test("notification polling finds new mentions and replies across accessible channels once",async()=>{
+  const {visitor}=fixture();
+  const owner=visitor("owner"), member=visitor("member");
+  await owner("enroll",{input:{username:"owner"}});
+  await member("enroll",{input:{username:"member",name:"Member"}});
+  await owner("admin",{input:{action:"account",target:"member",state:"approved",role:"member"}});
+  await member("enroll",{input:{}});
+  const {id:privateId}=await owner("admin",{input:{action:"channel",server:"community",name:"Private",kind:"private",users:["owner"]}});
+  assert.deepEqual((await owner("history?channel="+privateId+"&mentions=1")).mentionPeople,[]);
+  assert.equal((await owner("history?channel=general&mentions=1")).mentionPeople[0].username,"member");
+  await owner("message",{input:{channel:"general",text:"Older @member"}});
+  await member("message",{input:{channel:"general",text:"Original"}});
+  const original=(await owner("history?channel=general")).messages.at(-1);
+  const start=await member("poll?notices=latest");
+  assert.equal(start.notices,undefined);
+  for(const [channel,text,reply] of [
+    ["general","Reply",original.id],
+    ["announcements","Hey **@MEMBER**!"],
+    ["announcements","@member2 or name@member.test or `@member`"],
+    [privateId,"Private @member"],
+  ])await owner("message",{input:{channel,text,reply}});
+  await member("message",{input:{channel:"general",text:"Self @member"}});
+  const update=await member("poll?channel=general&notices="+start.noticeCursor);
+  assert.deepEqual(update.notices.map(({channel,mentioned})=>[channel,mentioned]),[["general",false],["announcements",true]]);
+  await owner("message",{input:{channel:"general",action:"react",id:update.notices[0].id,emoji:"👍"}});
+  assert.deepEqual((await member("poll?notices="+update.noticeCursor)).notices,[]);
+  await member("history?channel="+privateId+"&around="+update.notices[0].id,{expect:404});
+});
+
 test("voice sidechat persists and shares the room's permissions and polling with voice",async()=>{
   const {visitor}=fixture();
   const owner=visitor("owner"), member=visitor("member"), blocked=visitor("blocked");

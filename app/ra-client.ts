@@ -22,7 +22,8 @@ export function serverBackground(server:Pick<Server,"id"|"background"|"backgroun
   if(gradient)layers.push(gradient);
   return layers.join(",")+" "+(colour??"var(--base)");
 }
-export type Message = {id:number; uid:string; name:string; username:string; has_avatar:boolean; body:string; created:number; edited?:number; deleted:number; pinned:number; reply?:number; attachment?:string; filename?:string; reactions?:string; my_reactions?:string};
+export type Message = {id:number; uid:string; name:string; username:string; has_avatar:boolean; body:string; created:number; edited?:number; deleted:number; pinned:number; reply?:number; replyPreview?:ReplyPreview|null; attachment?:string; filename?:string; reactions?:string; my_reactions?:string};
+export type ReplyPreview = Pick<Message,"uid"|"name"|"username"|"has_avatar"|"body"|"filename">;
 export type Preferences = {
   input:string; output:string; camera:string; sensitivity:number; noise:boolean; echo:boolean; gain:boolean;
   ptt:boolean; key:string; screenQuality:"smooth"|"maximum"|"custom"; resolution:string; bitrate:number; codec:string; mode:string; notifications:boolean; compact:boolean; voiceSounds:boolean;
