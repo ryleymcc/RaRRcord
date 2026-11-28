@@ -279,7 +279,7 @@ async function route(request:Request, env:Cloudflare.Env):Promise<Response> {
     const rooms=async ()=>{
       if (!q.has("rooms")) return;
       // Everyone currently in a voice room this viewer can see, for the channel sidebar.
-      result.rooms=await all("SELECT v.channel,v.uid,u.name,u.avatar IS NOT NULL AS has_avatar,v.cam,v.screen FROM voice v JOIN users u ON v.uid=u.id JOIN channels c ON v.channel=c.id WHERE v.expires>? AND u.state='approved' AND c.kind='voice' AND "+channelAccess("c")+" AND "+channelAccess("c").replace("ca.uid=?","ca.uid=v.uid").replace("?='admin'","u.role='admin'").replace("ma.uid=?","ma.uid=v.uid")+" AND NOT EXISTS (SELECT 1 FROM blocks b WHERE (b.uid=? AND b.blocked=v.uid) OR (b.uid=v.uid AND b.blocked=?)) ORDER BY v.joined,u.name COLLATE NOCASE,v.uid",now,...access,id,id);
+      result.rooms=await all("SELECT v.channel,v.uid,u.name,u.avatar IS NOT NULL AS has_avatar,v.cam,v.screen,v.joined FROM voice v JOIN users u ON v.uid=u.id JOIN channels c ON v.channel=c.id WHERE v.expires>? AND u.state='approved' AND c.kind='voice' AND "+channelAccess("c")+" AND "+channelAccess("c").replace("ca.uid=?","ca.uid=v.uid").replace("?='admin'","u.role='admin'").replace("ma.uid=?","ma.uid=v.uid")+" AND NOT EXISTS (SELECT 1 FROM blocks b WHERE (b.uid=? AND b.blocked=v.uid) OR (b.uid=v.uid AND b.blocked=?)) ORDER BY v.joined,u.name COLLATE NOCASE,v.uid",now,...access,id,id);
     };
     await Promise.all([seen,chat(),call(),rooms()]);
     return json(result);
