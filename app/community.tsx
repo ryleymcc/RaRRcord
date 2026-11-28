@@ -9,8 +9,8 @@ import ModerateMember, { timeLeft } from "./moderate-member";
 import { isImage, typingText, uploadWithProgress } from "./upload";
 import { cleanAnnouncements, joinAnnouncement, playVoiceCue, speakAnnouncement } from "./voice-sounds";
 import { canBoost, route, setGain, type Route, loadScreenPreview, loadVolumes, maxVolume, saveScreenPreview, setVolume, streamVolumeKey } from "./user-volume";
-import { microphoneConstraints, processVoice, suppressionMode, suppressionModes, type VoiceProcessor } from "./noise-suppression";
-import { VoiceSession, codecs, type Call, type Feed, type Metrics, type Participant, type Signal } from "./rtc";
+import { microphoneConstraints, preloadVoice, processVoice, suppressionMode, suppressionModes, type VoiceProcessor } from "./noise-suppression";
+import { VoiceSession, codecs, iceServers, type Call, type Feed, type Metrics, type Participant, type Signal } from "./rtc";
 import { request, defaults, qualities, appLogoUrl, serverPictureUrl, serverBackground, type Channel, type Message, type Person, type Preferences, type Server } from "./ra-client";
 import Admin from "./ra-admin";
 import { DiagnosticCharts, WebRtcInternals } from "./diagnostic-charts";
@@ -56,6 +56,15 @@ function CallTimer({since}:{since:number}){
 type RowActions={action:(kind:string,m:Message,extra?:object)=>Promise<void>;reply:(m:Message)=>void;pick:(m:Message)=>void;edit:(m:Message)=>void;menu:(id:number|null)=>void;jump:(id:number)=>void;remove:(m:Message)=>void;report:(m:Message)=>void};
 const snippet=(text:string)=>text.replace(/\x60\x60\x60[\s\S]*?(\x60\x60\x60|$)/g,"[code]").replace(/\s+/g," ").trim().slice(0,120);
 // A row only re-renders when its message, its neighbour, its menu or the viewer changes, not on every poll.
+function serial(){
+  let tail:Promise<unknown>=Promise.resolve();
+  return <T,>(job:()=>Promise<T>)=>{const next=tail.then(job);tail=next.catch(()=>{});return next;};
+}
+// The copy of a just-sent message that shows until the server's own copy arrives.
+function pendingMessage(person:Person,channel:string,body:string,reply?:number):Message&{channel:string}{
+  const now=Date.now();
+  return {id:-now-Math.random(),channel,uid:person.id,name:person.name,username:person.username,has_avatar:!!person.avatar,body,created:now,deleted:0,pinned:0,reply};
+}
 const MessageRow=memo(function MessageRow({m,previous,replyTo,me,admin,menuOpen,unreadStart=false,actions}:{m:Message;previous?:Message;replyTo?:Message;me?:string;admin:boolean;menuOpen:boolean;unreadStart?:boolean;actions:RowActions}){
   const newDay=!previous||day(previous.created)!==day(m.created);
   const joined=!unreadStart&&!m.reply&&!!previous&&!newDay&&previous.uid===m.uid&&m.created-previous.created<240000;
@@ -362,6 +371,12 @@ export default function Community({localAuth=false}:{localAuth?:boolean}={}){
   const [dragging,setDragging]=useState(false);
   const [unreadFrom,setUnreadFrom]=useState<{channel:string;id:number}|null>(null);
   const [sending,setSending]=useState(false);
+  // Messages you sent that the server has not echoed back yet. They show at once, dimmed, so sending feels instant.
+  const [outbox,setOutbox]=useState<(Message&{channel:string})[]>([]);
+  // Sends go out one at a time, in the order you typed them.
+  const [enqueue]=useState(serial);
+  // Asks the poll loop for an update now, after you change something, instead of on its next tick.
+  const pollNow=useRef<()=>void>(()=>{});
   const [picker,setPicker]=useState<"emoji"|"gif"|Message|null>(null);
   const [sidechat,setSidechat]=useState("");
   const [edit,setEdit]=useState<Message|null>(null);
@@ -482,7 +497,12 @@ export default function Community({localAuth=false}:{localAuth?:boolean}={}){
   useEffect(()=>{
     if(!auth?.active)return;
     let active=true,timer:ReturnType<typeof setTimeout>;
+    let polling=false,again=false;
+    pollNow.current=()=>{if(!active)return;if(polling){again=true;return;}clearTimeout(timer);timer=setTimeout(poll,0);};
+    // A call that starts negotiating media wants its answer now, not on the next slow tick.
+    voice.whenBusy(()=>{if(!active||polling)return;clearTimeout(timer);timer=setTimeout(poll,0);});
     const poll=async()=>{
+      polling=true;
       const params=new URLSearchParams();
       const liveCall=voice.call;
       if(ready===chatId&&chatId&&!find&&!pinned){params.set("channel",chatId);params.set("after",String(cursor.current));}
@@ -502,6 +522,8 @@ export default function Community({localAuth=false}:{localAuth?:boolean}={}){
           {const names=result.typing?.map(t=>t.name)??[];setTyping(previous=>previous.join("\n")===names.join("\n")?previous:names);}
           if(result.messages?.length){
             const changed=result.messages;
+            const channel=params.get("channel");
+            setOutbox(list=>list.some(p=>p.channel===channel&&changed.some(m=>m.uid===p.uid&&m.body===p.body))?list.filter(p=>!(p.channel===channel&&changed.some(m=>m.uid===p.uid&&m.body===p.body))):list);
             setMessages(previous=>{
               const rows=new Map(previous.map(m=>[m.id,m]));
               for(const message of changed){
@@ -523,12 +545,24 @@ export default function Community({localAuth=false}:{localAuth?:boolean}={}){
         }
       }catch{
         if(active)void refreshAuth();
-      }finally{if(active)timer=setTimeout(poll,voice.call?750:document.hidden?4500:1500);}
+      }finally{
+        polling=false;
+        if(active){clearTimeout(timer);timer=setTimeout(poll,again?0:voice.call?voice.call.pollInterval():document.hidden?4500:1500);again=false;}
+      }
     };
     void poll();
     return ()=>{active=false;clearTimeout(timer);};
   },[auth?.active,ready,chatId,find,pinned,chatChannel?.name,prefs.notifications,person?.id,person?.username,refreshAuth,report,call,voice]);
   useEffect(()=>()=>voice.disconnect(),[voice]);
+  // Once the app has loaded, fetch what joining a voice room needs (ICE servers and the denoiser model),
+  // so a click on a voice channel does not wait for them.
+  const voiceMode=space?suppressionMode(prefs):"";
+  useEffect(()=>{
+    if(!auth?.active||!voiceMode)return;
+    const start=()=>{void iceServers().catch(()=>{});preloadVoice({...defaults,suppression:voiceMode as Preferences["suppression"]});};
+    const idle=typeof requestIdleCallback==="function"?requestIdleCallback(start,{timeout:3000}):window.setTimeout(start,1500);
+    return ()=>{if(typeof cancelIdleCallback==="function")cancelIdleCallback(idle as number);else clearTimeout(idle);};
+  },[auth?.active,voiceMode]);
   const callUids=call?[...new Set(call.participants.map(p=>p.uid))].sort().join(","):"";
   useEffect(()=>{
     const state=cueState.current;
@@ -645,6 +679,26 @@ export default function Community({localAuth=false}:{localAuth?:boolean}={}){
     event.preventDefault();
     const text=draft.trim();
     if((!text&&!gif&&!files.length)||!chatChannel||sending)return;
+    if(!edit&&!gif&&!files.length&&person){
+      // Plain text: clear the box and show the message straight away; requests go out in order behind the scenes.
+      const channel=chatId,replyTo=reply?.id;
+      const pending=pendingMessage(person,channel,text,replyTo);
+      setOutbox(list=>[...list,pending]);
+      setDrafts(previous=>previous[channel]===draft?{...previous,[channel]:""}:previous);
+      stick.current=true;setReply(null);draftInput.current?.focus();
+      if(find||pinned){setFind("");setPinned(false);}
+      const drop=()=>setOutbox(list=>list.filter(p=>p!==pending));
+      void enqueue(()=>request("message",{channel,text,action:"send",reply:replyTo})).then(()=>{
+        pollNow.current();
+        // If the echo never arrives (you switched away), stop showing the copy.
+        setTimeout(drop,8000);
+      },e=>{
+        drop();
+        setDrafts(previous=>previous[channel]?previous:{...previous,[channel]:text});
+        report((e as Error).message);
+      });
+      return;
+    }
     setSending(true);
     try{
       if(files.length&&!edit){
@@ -665,6 +719,7 @@ export default function Community({localAuth=false}:{localAuth?:boolean}={}){
         setGifDraft(previous=>previous?.file===gif?null:previous);
       }else await request("message",{channel:chatId,text,action:edit?"edit":"send",id:edit?.id,reply:reply?.id});
       setDrafts(previous=>previous[chatId]===draft?{...previous,[chatId]:""}:previous);
+      pollNow.current();
       if(feed.current?.dataset.channel===chatId){
         stick.current=true;setEdit(null);setReply(null);draftInput.current?.focus();
         if(find||pinned){setFind("");setPinned(false);}
@@ -681,7 +736,7 @@ export default function Community({localAuth=false}:{localAuth?:boolean}={}){
     draftInput.current?.focus();
   }
   async function action(kind:string,m:Message,extra:object={}){
-    try{await request("message",{channel:chatId,action:kind,id:m.id,...extra});}
+    try{await request("message",{channel:chatId,action:kind,id:m.id,...extra});pollNow.current();}
     catch(e){report((e as Error).message);}
   }
   // Message rows get one stable set of handlers that call the latest ones, so unchanged rows skip re-rendering.
@@ -925,6 +980,9 @@ export default function Community({localAuth=false}:{localAuth?:boolean}={}){
           {!bounded.length&&!(chatId&&ready!==chatId)&&<div className="blank"><span className="empty-icon">{sidechatOpen?<MessageSquare size={26}/>:<Hash size={26}/>}</span><h2>{find?"No matching messages":pinned?"No pinned messages":chatChannel?.name??"Welcome to RaRRcord"}</h2>{(!chatId||ready===chatId)&&<p>{find?"Try another search.":pinned?"Pinned messages will appear here.":chatChannel?"Start the conversation.":"Choose a channel to get started."}</p>}</div>}
           {bounded.map((m,i)=><MessageRow key={m.id} m={m} previous={bounded[i-1]} replyTo={m.reply?byId.get(m.reply):undefined}
             me={person?.id} admin={person?.role==="admin"} menuOpen={menu===m.id} unreadStart={unreadFrom?.channel===chatId&&unreadFrom.id===m.id} actions={rowActions}/>)}
+          {ready===chatId&&!find&&!pinned&&outbox.filter(p=>p.channel===chatId).map((p,i,list)=><div key={p.id} className="pending-message" inert aria-label="Sending">
+            <MessageRow m={p} previous={i?list[i-1]:bounded.at(-1)} replyTo={p.reply?byId.get(p.reply):undefined} me={person?.id} admin={false} menuOpen={false} actions={rowActions}/>
+          </div>)}
         </div></div>
         {unseen>0&&<button type="button" className="jump-present" onClick={()=>{if(feed.current){stick.current=true;feed.current.scrollTop=feed.current.scrollHeight;}setAwayFrom(null);}}>{unseen===1?"1 new message":unseen+" new messages"}<ArrowDown size={15}/></button>}
         {chatChannel&&<div className="compose-area">

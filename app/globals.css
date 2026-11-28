@@ -195,6 +195,7 @@ input[type=file]{max-width:100%}
 .mobile-toggle{display:none}
 .message-feed{overflow:auto;flex:1;display:block;min-height:0;padding:8px 0 20px}
 .message-row{content-visibility:auto}
+.pending-message{opacity:.55;transition:opacity .15s}
 .message{position:relative;display:grid;grid-template-columns:40px minmax(0,1fr);gap:0 16px;margin-top:17px;padding:2px 48px 2px 16px}
 .message:hover,.message:focus-within{background:var(--message-hover)}
 .message.joined{margin-top:0;padding-top:1px;padding-bottom:1px}

@@ -184,7 +184,7 @@ test("a rapid switch supersedes an in-flight join, and a rejected join never ope
   assert.deepEqual(errors,["Voice room unavailable."]);
 });
 
-test("cameras and screen shares open automatically, and stopping one holds until that share ends",async t=>{
+test("cameras and screen shares open automatically, and stopping one holds until that share ends; a share that ends sends no unsubscribe",async t=>{
   const {voice,requests}=fixture(t);
   await voice.join("general-voice",defaults,0);
   await settle();
@@ -204,6 +204,6 @@ test("cameras and screen shares open automatically, and stopping one holds until
   await call.update([remote],[]);
   assert.equal(call.watching(remote.peer,"cam"),false);
   assert.equal(call.watching(remote.peer,"screen"),false);
-  assert.deepEqual(subscriptions().map(({medium,active})=>medium+":"+active),["screen:true","cam:true","screen:false","screen:true","cam:false","screen:false"]);
+  assert.deepEqual(subscriptions().map(({medium,active})=>medium+":"+active),["screen:true","cam:true","screen:false","screen:true"]);
   voice.disconnect();
 });

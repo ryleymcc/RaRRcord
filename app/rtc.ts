@@ -4,12 +4,12 @@ import { meter, prepareMeters, type SpeakingMeter } from "./speaking";
 import { displayMediaOptions, encoderFrameRate, governFrameRate, previewTrack, probeEncoders, screenShareSettings, startGovernor, applyNativeCapture, videoCodecPreferences, type Governor } from "./screen-share";
 export type Participant={uid:string;peer:string;name:string;cam:number;screen:number};
 type Medium="voice"|"cam"|"screen";
-type Wire={type:"description";value:RTCSessionDescriptionInit}|{type:"ice";value:RTCIceCandidateInit}|{type:"subscribe";medium:Medium;active:boolean}|{type:"tracks";labels:Record<string,Medium>}|{type:"speaking";active:boolean};
+type Wire={type:"description";value:RTCSessionDescriptionInit}|{type:"ice";value:RTCIceCandidateInit}|{type:"candidates";values:RTCIceCandidateInit[]}|{type:"subscribe";medium:Medium;active:boolean}|{type:"tracks";labels:Record<string,Medium>}|{type:"speaking";active:boolean};
 export type Signal={id:number;sender:string;data:string};
 export type Feed={key:string;peer:string;kind:Medium;stream:MediaStream};
 type Link={
   remote:Participant;pc:RTCPeerConnection;making:boolean;ignoring:boolean;answering:boolean;
-  outgoing:Promise<void>; localCandidates:RTCIceCandidateInit[]|null;
+  outgoing:Promise<void>; localCandidates:RTCIceCandidateInit[]|null; trickle:RTCIceCandidateInit[]; trickleTimer?:number;
   candidates:RTCIceCandidateInit[]; senders:Map<Medium,RTCRtpSender[]>; wanted:Set<Medium>;
   watching:Set<Medium>; declined:Set<Medium>; incoming:Map<string,MediaStream>; labels:Record<string,Medium>;
   speaking:boolean; previous:Map<string,Record<string,number>>; retry:number;
@@ -49,13 +49,17 @@ export class Call {
   private starting=new Set<Medium>();
   // Which codecs this browser encodes smoothly (and in hardware) at the screen profile, probed before the share is published.
   private encoders:Awaited<ReturnType<typeof probeEncoders>>=[];
+  // Until this time, polls run fast: a negotiation is under way and its answer is a poll away.
+  private busyUntil=0;
+  /** Called when a negotiation starts, so the page can poll right away instead of on its slow timer. */
+  busy?:()=>void;
   // Lowers the share's frame rate when the encoder runs short of CPU, so the game on the same PC keeps its own.
   governor?:Governor;
   private governorTimer?:number;
   private encodeTotals=new Map<string,{time:number;frames:number}>();
   // A low-rate copy of your own screen for the self preview (see previewTrack).
   screenPreview?:MediaStream;
-  constructor(channel:string,public prefs:Preferences,private screenBitrateLimit:number,private ice:RTCIceServer[],private changed:()=>void,private error:(message:string)=>void) {
+  constructor(channel:string,public prefs:Preferences,private screenBitrateLimit:number,public ice:RTCIceServer[],private changed:()=>void,private error:(message:string)=>void) {
     this.channel=channel;
     window.addEventListener("keydown",this.keydown);
     window.addEventListener("keyup",this.keyup);
@@ -68,13 +72,21 @@ export class Call {
   };
   private keyup=(e:KeyboardEvent)=>{ if(e.code===this.prefs.key)this.release(); };
   private release=()=>{this.pressed=false;this.micState();};
+  /** How long to wait before the next poll: fast while media is being negotiated, otherwise the normal in-call rate. */
+  pollInterval(){return performance.now()<this.busyUntil?150:750;}
+  private hurry(){
+    const idle=performance.now()>=this.busyUntil;
+    this.busyUntil=performance.now()+4000;
+    if(idle)this.busy?.();
+  }
   private send(target:string,data:Wire) {
     if(this.closed) return Promise.resolve();
+    if(data.type==="description"||data.type==="candidates"||data.type==="subscribe")this.hurry();
     return request("signal",{channel:this.channel,peer:this.peer,target,data}).then(()=>{},e=>{
       if (data.type==="description") this.error(e.message);
     });
   }
-  private sendNegotiation(link:Link,data:Extract<Wire,{type:"description"|"ice"}>) {
+  private sendNegotiation(link:Link,data:Extract<Wire,{type:"description"|"candidates"}>) {
     link.outgoing=link.outgoing.then(()=>this.send(link.remote.peer,data));
   }
   private async describe(link:Link) {
@@ -84,7 +96,7 @@ export class Call {
       await link.pc.setLocalDescription();
       if(!link.pc.localDescription)return;
       this.sendNegotiation(link,{type:"description",value:link.pc.localDescription.toJSON()});
-      for(const value of candidates)this.sendNegotiation(link,{type:"ice",value});
+      if(candidates.length)this.sendNegotiation(link,{type:"candidates",values:candidates});
     } finally {
       link.localCandidates=null;
     }
@@ -101,6 +113,7 @@ export class Call {
       if(remote.peer===this.peer || this.links.has(remote.peer)) continue;
       this.create(remote);
     }
+    if(signals.length)this.hurry();
     for(const event of signals) {
       this.signal=Math.max(this.signal,event.id);
       const link=this.links.get(event.sender);
@@ -112,8 +125,9 @@ export class Call {
       const link=this.links.get(participant.peer);
       if(!link)continue;
       // Cameras and screen shares open on their own. "Stop watching" holds until that share ends.
+      // A share counts as on once its tracks arrive, even if this roster is older than the share.
       for(const medium of ["cam","screen"] as const){
-        if(participant[medium]){
+        if(participant[medium] || this.receiving(link,medium)){
           if(!link.watching.has(medium) && !link.declined.has(medium)) this.watch(participant.peer,medium,true,false);
         }else{
           if(link.watching.has(medium)) this.watch(participant.peer,medium,false,false);
@@ -127,8 +141,9 @@ export class Call {
   }
   private create(remote:Participant) {
     const pc=new RTCPeerConnection({iceServers:this.ice,iceTransportPolicy:this.prefs.hideIp?"relay":"all"});
-    const link:Link={pc,remote,making:false,ignoring:false,answering:false,outgoing:Promise.resolve(),localCandidates:null,candidates:[],senders:new Map(),wanted:new Set(["voice"]),watching:new Set(["voice"]),declined:new Set(),incoming:new Map(),labels:{},speaking:false,previous:new Map(),retry:0};
+    const link:Link={pc,remote,making:false,ignoring:false,answering:false,outgoing:Promise.resolve(),localCandidates:null,trickle:[],candidates:[],senders:new Map(),wanted:new Set(["voice","cam","screen"]),watching:new Set(["voice"]),declined:new Set(),incoming:new Map(),labels:{},speaking:false,previous:new Map(),retry:0};
     this.links.set(remote.peer,link);
+    this.hurry();
     pc.onnegotiationneeded=async()=>{
       try {
         link.making=true;
@@ -139,8 +154,14 @@ export class Call {
     pc.onicecandidate=({candidate})=>{
       if(!candidate)return;
       const value=candidate.toJSON();
-      if(link.localCandidates)link.localCandidates.push(value);
-      else this.sendNegotiation(link,{type:"ice",value});
+      if(link.localCandidates){link.localCandidates.push(value);return;}
+      // Candidates come in bursts; send each burst as one request instead of one per candidate.
+      link.trickle.push(value);
+      if(link.trickleTimer===undefined)link.trickleTimer=window.setTimeout(()=>{
+        link.trickleTimer=undefined;
+        const values=link.trickle.splice(0);
+        if(values.length && !this.closed)this.sendNegotiation(link,{type:"candidates",values});
+      },25);
     };
     pc.oniceconnectionstatechange=()=>{
       if(pc.iceConnectionState==="failed" && link.retry++<3)pc.restartIce();
@@ -208,10 +229,12 @@ export class Call {
       try{await pc.setRemoteDescription(data.value);}finally{link.answering=false;}
       for(const candidate of link.candidates.splice(0))await pc.addIceCandidate(candidate).catch(()=>{});
       if(data.value.type==="offer")await this.describe(link);
-    }else if(data.type==="ice"){
+    }else if(data.type==="ice"||data.type==="candidates"){
       if(link.ignoring)return;
-      if(pc.remoteDescription) await pc.addIceCandidate(data.value);
-      else link.candidates.push(data.value);
+      for(const value of data.type==="ice"?[data.value]:Array.isArray(data.values)?data.values:[]){
+        if(pc.remoteDescription) await pc.addIceCandidate(value).catch(()=>{});
+        else link.candidates.push(value);
+      }
     }else if(data.type==="subscribe"){
       if(!["cam","screen"].includes(data.medium))return;
       if(data.active)link.wanted.add(data.medium);
@@ -219,10 +242,19 @@ export class Call {
       this.publish(link,data.medium);
     }else if(data.type==="tracks"){
       link.labels=data.labels;
+      // A camera or screen arriving before the roster says it is on still opens straight away.
+      for(const kind of Object.values(data.labels))if((kind==="cam"||kind==="screen")&&!link.declined.has(kind))link.watching.add(kind);
     }
     // "speaking" signals from older tabs are ignored: speaking is measured locally now.
   }
+  private receiving(link:Link,medium:Medium){
+    return [...link.incoming].some(([id,stream])=>link.labels[id]===medium&&stream.getTracks().some(t=>t.readyState==="live"));
+  }
   private publish(link:Link, medium:Medium) {
+    const current=link.senders.get(medium)??[];
+    const tracks=link.wanted.has(medium)?this.local.get(medium)?.getTracks()??[]:[];
+    // Already sending exactly this: a repeat subscribe must not cost a renegotiation.
+    if(current.length===tracks.length && current.every((sender,i)=>sender.track===tracks[i]))return;
     for(const sender of link.senders.get(medium)??[])link.pc.removeTrack(sender);
     link.senders.delete(medium);
     const stream=this.local.get(medium);
@@ -298,7 +330,9 @@ export class Call {
       if(active)link.declined.delete(medium);
       else link.declined.add(medium);
     }
-    void this.send(peer,{type:"subscribe",medium,active});
+    // Everyone is sent every share up front, so only a choice to hide one (or show it again) goes back to the sender.
+    // A share that simply ended needs no message: the sender stopped it.
+    if(chosen||active)void this.send(peer,{type:"subscribe",medium,active});
     this.refresh();
   }
   watching(peer:string,medium:Medium){return !!this.links.get(peer)?.watching.has(medium);}
@@ -359,7 +393,7 @@ export class Call {
         throw new Error("No working microphone was found. Check your input device in User settings.");
       }
       if(kind==="voice"){
-        const raw=stream, processor=await processVoice(raw,prefs);
+        const raw=stream, processor=await processVoice(raw,prefs,prepareMeters);
         if(this.closed){processor.close();raw.getTracks().forEach(track=>track.stop());return;}
         this.voice={raw,processor};
         stream=processor.stream;
@@ -398,7 +432,11 @@ export class Call {
     stream?.getTracks().forEach(track=>track.stop());
     if(kind==="voice"){this.stopMeter();this.releaseVoice();}
     if(kind==="screen")this.stopScreenExtras();
-    for(const link of this.links.values())this.publish(link,kind);
+    for(const link of this.links.values()){
+      this.publish(link,kind);
+      // Someone who hid this share sees the next one again, as on their side.
+      link.wanted.add(kind);
+    }
     if(kind!=="voice")await this.announce();
     this.changed();
   }
@@ -538,6 +576,9 @@ export class VoiceSession {
   private joining=Promise.resolve();
   constructor(private changed:(call:Call|null)=>void,private updated:()=>void,private error:(message:string)=>void){}
 
+  private onBusy?:()=>void;
+  /** Sets what runs when a call starts negotiating media, so the page can poll at once. */
+  whenBusy(handler:()=>void){this.onBusy=handler;}
   join(channel:string,prefs:Preferences,limit:number){
     if(this.target?.channel===channel)return this.joining;
     if(this.call?.channel===channel){this.target=null;return this.joining;}
@@ -546,21 +587,26 @@ export class VoiceSession {
     this.target=target;
     // The server stores one room per user, so join requests must arrive in order.
     this.joining=this.joining.then(async()=>{
+      let call:Call|undefined;
       try{
         if(this.target!==target)return;
-        const ice=await request<{servers:RTCIceServer[];relay?:boolean}>("ice");
+        const ice=iceServers();
+        if(prefs.hideIp && !(await ice).relay)throw new Error("Hide my IP needs a TURN relay, and this server has none. Ask an admin to set one up, or turn the setting off in User settings.");
         if(this.target!==target)return;
-        if(prefs.hideIp && !ice.relay)throw new Error("Hide my IP needs a TURN relay, and this server has none. Ask an admin to set one up, or turn the setting off in User settings.");
         this.closeCall();
-        const call=new Call(channel,prefs,limit,ice.servers,this.updated,this.error);
-        try{
-          await request("voice",{action:"join",channel,peer:call.peer});
-          if(this.target!==target){call.close();return;}
-        }catch(error){call.close();throw error;}
+        call=new Call(channel,prefs,limit,[],this.updated,this.error);
+        // ICE servers were usually fetched when the app loaded, so this is one round trip: the join itself.
+        // The microphone opens only once the room accepts you, so a refused or superseded join never turns it on.
+        const [servers]=await Promise.all([ice,request("voice",{action:"join",channel,peer:call.peer})]);
+        if(this.target!==target){call.close();return;}
+        call.ice=servers.servers;
+        const live=call;
+        call.busy=()=>{if(this.call===live)this.onBusy?.();};
         this.call=call;
         this.changed(call);
         void call.startMicrophone();
       }catch(error){
+        call?.close();
         if(this.target===target)this.error(error instanceof Error?error.message:"Could not join the voice room.");
       }finally{if(this.target===target)this.target=null;}
     });
@@ -577,4 +623,18 @@ export class VoiceSession {
     this.call=null;
     this.changed(null);
   }
+}
+
+// ICE servers (STUN, plus TURN credentials when the server has a relay). Fetching TURN credentials costs the
+// server a call to Cloudflare, so the answer is fetched once ahead of time and reused for a few minutes.
+type IceAnswer={servers:RTCIceServer[];relay?:boolean};
+let iceCache:{at:number;value:Promise<IceAnswer>}|undefined;
+export function iceServers(){
+  if(!iceCache||performance.now()-iceCache.at>5*60_000){
+    const value=request<IceAnswer>("ice");
+    const entry={at:performance.now(),value};
+    iceCache=entry;
+    value.catch(()=>{if(iceCache===entry)iceCache=undefined;});
+  }
+  return iceCache.value;
 }
