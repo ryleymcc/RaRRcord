@@ -3,13 +3,13 @@ import { test } from "node:test";
 import { defaults } from "../app/ra-client.ts";
 import { defaultBitrateKbps, displayMediaOptions, encoderFrameRate, screenShareSettings, applyNativeCapture, videoCodecPreferences } from "../app/screen-share.ts";
 
-test("the default profile captures 1080p at 144 FPS and keeps motion smooth", () => {
+test("the default profile captures 1080p at 60 FPS and keeps motion smooth", () => {
   const settings = screenShareSettings(defaults,0);
   assert.equal(settings.profile,"smooth");
-  assert.deepEqual(settings.capture,{width:{ideal:1920,max:1920},height:{ideal:1080,max:1080},frameRate:{ideal:144,max:144}});
-  assert.equal(settings.frameRateCap,144);
-  assert.equal(settings.bitrateCap,defaultBitrateKbps(1920,1080,144)*1000);
-  assert.ok(settings.bitrateCap>=20000000,"well above WebRTC's 2.5 Mbps default");
+  assert.deepEqual(settings.capture,{width:{ideal:1920,max:1920},height:{ideal:1080,max:1080},frameRate:{ideal:60,max:60}});
+  assert.equal(settings.frameRateCap,60);
+  assert.equal(settings.bitrateCap,defaultBitrateKbps(1920,1080,60)*1000);
+  assert.ok(settings.bitrateCap>=8000000,"well above WebRTC's 2.5 Mbps default");
   assert.equal(settings.hint,"motion");
   assert.equal(settings.degradation,"maintain-framerate");
   assert.equal(settings.codec,"smooth");
@@ -18,14 +18,15 @@ test("the default profile captures 1080p at 144 FPS and keeps motion smooth", ()
 
 test("sharpest profile uses native dimensions, keeps resolution and always sets ceilings", () => {
   const settings = screenShareSettings({...defaults,screenQuality:"maximum",resolution:"720x30",bitrate:2000},0);
-  assert.deepEqual(settings.capture,{frameRate:{ideal:144}});
+  assert.deepEqual(settings.capture,{frameRate:{ideal:60,max:60}});
   assert.equal(settings.hint,"detail");
   assert.equal(settings.degradation,"maintain-resolution");
   assert.equal(settings.codec,"quality");
-  assert.equal(settings.bitrateCap,50000000);
-  assert.equal(encoderFrameRate(settings,165),165);
-  assert.equal(encoderFrameRate(settings,undefined),144);
-  assert.equal(encoderFrameRate(screenShareSettings(defaults,0),165),144);
+  assert.equal(settings.bitrateCap,defaultBitrateKbps(3840,2160,60)*1000);
+  assert.equal(encoderFrameRate(settings,165),60);
+  assert.equal(encoderFrameRate(settings,30),30);
+  assert.equal(encoderFrameRate(settings,undefined),60);
+  assert.equal(encoderFrameRate(screenShareSettings(defaults,0),165),60);
 });
 
 test("custom settings and an explicit community ceiling apply to the sender", () => {
@@ -73,12 +74,23 @@ test("display capture asks for system audio without voice processing", () => {
   assert.equal(options.selfBrowserSurface,"exclude");
 });
 
-test("native capture uses the selected surface's reported resolution and refresh rate", async () => {
+test("encoders share a frame budget once three or more people watch", () => {
+  const smooth=screenShareSettings(defaults,0);
+  assert.equal(encoderFrameRate(smooth,60,1),60);
+  assert.equal(encoderFrameRate(smooth,60,2),60);
+  assert.equal(encoderFrameRate(smooth,60,3),40);
+  assert.equal(encoderFrameRate(smooth,60,8),30);
+  const custom=screenShareSettings({...defaults,screenQuality:"custom",resolution:"1080x144"},0);
+  assert.equal(encoderFrameRate(custom,144,1),144);
+  assert.equal(encoderFrameRate(custom,144,4),30);
+});
+
+test("native capture uses the surface's resolution but keeps the profile's frame rate", async () => {
   let constraints;
   await applyNativeCapture({
     getCapabilities:()=>({width:{max:3440},height:{max:1440},frameRate:{max:165}}),
     getSettings:()=>({width:2580,height:1080,frameRate:60}),
     applyConstraints:async value=>{constraints=value;},
   });
-  assert.deepEqual(constraints,{width:{ideal:3440},height:{ideal:1440},frameRate:{ideal:165}});
+  assert.deepEqual(constraints,{width:{ideal:3440},height:{ideal:1440},frameRate:{ideal:60,max:60}});
 });

@@ -1,10 +1,13 @@
 import type { Preferences } from "./ra-client";
 
-// "smooth"  1080p at up to 144 FPS, tuned for motion (games, video). The default.
-// "maximum" native resolution and refresh rate, tuned for text clarity.
+// "smooth"  1080p at 60 FPS, tuned for motion (games, video). The default.
+// "maximum" native resolution at up to 60 FPS, tuned for text clarity.
+// Capture and encode run on the same GPU the sharer's game is using, once per viewer in a mesh call,
+// so the presets stop at 60 FPS: 144 FPS share costs the game frames. Custom still offers 120 and 144.
+const presetFps = 60;
 // "custom"  the user's own resolution, frame rate, bitrate, codec and mode.
 const qualityOrder = ["video/av1", "video/vp9", "video/h264", "video/vp8"];
-// Software AV1/VP9 encoders cannot keep up with 1080p at 144 FPS. H.264 is the codec most
+// Software AV1/VP9 encoders cannot keep up with 1080p at high frame rates. H.264 is the codec most
 // likely to have a hardware encoder, so it leads until the browser says otherwise.
 const smoothOrder = ["video/h264", "video/av1", "video/vp9", "video/vp8"];
 
@@ -23,7 +26,7 @@ export function screenShareSettings(preferences: Preferences, adminBitrate: numb
   const target = /^\d{3,4}x\d{2,3}$/.test(preferences.resolution) ? preferences.resolution : "1080x60";
   const [customHeight, customFps] = target.split("x").map(Number);
   const height = profile === "smooth" ? 1080 : profile === "maximum" ? 2160 : customHeight;
-  const fps = profile === "custom" ? customFps : 144;
+  const fps = profile === "custom" ? customFps : presetFps;
   const width = Math.round(height * 16 / 9);
   const personal = profile === "custom" && preferences.bitrate > 0 ? preferences.bitrate : defaultBitrateKbps(width, height, fps);
   const caps = [adminBitrate, personal].filter(n => Number.isSafeInteger(n) && n > 0);
@@ -31,7 +34,7 @@ export function screenShareSettings(preferences: Preferences, adminBitrate: numb
   return {
     profile,
     maximum: profile === "maximum",
-    capture: profile === "maximum" ? {frameRate:{ideal:fps}} :
+    capture: profile === "maximum" ? {frameRate:{ideal:fps,max:fps}} :
       {width:{ideal:width,max:width},height:{ideal:height,max:height},frameRate:{ideal:fps,max:fps}},
     frameRateCap: fps,
     bitrateCap: Math.min(...caps) * 1000,
@@ -43,11 +46,18 @@ export function screenShareSettings(preferences: Preferences, adminBitrate: numb
   };
 }
 
-// The track reports its real frame rate once capture starts; the encoder ceiling follows it so a
-// 165 Hz monitor is not held to 144 and a 60 Hz one does not reserve bitrate for frames it never makes.
-export function encoderFrameRate(profile: ScreenProfile, captured?: number) {
-  if (profile.profile === "maximum" && captured && Number.isFinite(captured) && captured > 0) return Math.round(captured);
-  return profile.frameRateCap;
+// Every viewer in a mesh call gets their own encode of the share. Past this many encoded frames a second
+// (two viewers at 60 FPS) the encoders start taking frames from the sharer's game, so more viewers share it.
+const encodeBudget = 120;
+
+// The track reports its real frame rate once capture starts; the encoder ceiling follows it down so a
+// 30 Hz surface does not reserve bitrate for frames it never makes, but never above the profile's cap.
+// With three or more viewers each encode is held to an even share of the budget, but not below 30 FPS.
+export function encoderFrameRate(profile: ScreenProfile, captured?: number, viewers = 1) {
+  let fps = profile.frameRateCap;
+  if (captured && Number.isFinite(captured) && captured > 0) fps = Math.min(fps, Math.round(captured));
+  if (viewers > 2) fps = Math.min(fps, Math.max(30, Math.floor(encodeBudget / viewers)));
+  return fps;
 }
 
 type Probe = {mimeType:string; smooth:boolean; powerEfficient:boolean};
@@ -88,12 +98,14 @@ export function videoCodecPreferences<T extends {mimeType:string}>(codecs: T[], 
   return [...codecs].sort((a,b)=>rank(a)-rank(b));
 }
 
-export async function applyNativeCapture(track: MediaStreamTrack) {
+// Raises capture to the surface's native resolution. The frame rate stays at the profile's cap:
+// matching a 120-165 Hz monitor would double the capture and encode work taken from the game.
+export async function applyNativeCapture(track: MediaStreamTrack, fps = presetFps) {
   const caps = track.getCapabilities?.();
   const current = track.getSettings();
-  const constraints: MediaTrackConstraints = {frameRate:{ideal:144}};
+  const constraints: MediaTrackConstraints = {frameRate:{ideal:fps,max:fps}};
   let apply = false;
-  for (const key of ["width","height","frameRate"] as const) {
+  for (const key of ["width","height"] as const) {
     const maximum=caps?.[key]?.max;
     if (!maximum || !Number.isFinite(maximum) || maximum <= (current[key] ?? 0)) continue;
     constraints[key]={ideal:maximum};

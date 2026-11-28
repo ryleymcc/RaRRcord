@@ -234,14 +234,17 @@ export class Call {
         return sender;
       });
       link.senders.set(medium,senders);
-      this.applyEncoding(link);
     }
+    // A mesh call runs one screen encoder per viewer, so a viewer joining or leaving changes every link's share.
+    if(medium==="screen")for(const other of this.links.values())this.applyEncoding(other);
+    else this.applyEncoding(link);
     const labels:Record<string,Medium>={};
     for(const [kind,source] of this.local) if(link.wanted.has(kind))labels[source.id]=kind;
     void this.send(link.remote.peer,{type:"tracks",labels});
   }
   private applyEncoding(link:Link){
     const screen=screenShareSettings(this.prefs,this.screenBitrateLimit);
+    const viewers=[...this.links.values()].filter(l=>l.senders.get("screen")?.some(s=>s.track?.kind==="video")).length;
     for(const [medium,senders] of link.senders)for(const sender of senders){
       const track=sender.track;
       if(!track || medium==="voice")continue;
@@ -255,7 +258,7 @@ export class Call {
         // Always set an explicit ceiling: with none, WebRTC's default for 1080p is a few Mbps,
         // which turns a 144 FPS share into a blurry low-resolution one.
         encoding.maxBitrate=screen.bitrateCap;
-        encoding.maxFramerate=encoderFrameRate(screen,track.getSettings().frameRate);
+        encoding.maxFramerate=encoderFrameRate(screen,track.getSettings().frameRate,viewers);
         encoding.priority="high";
         encoding.networkPriority="high";
         params.degradationPreference=screen.degradation;
@@ -342,7 +345,7 @@ export class Call {
       let stream=kind==="screen"?await capture.getDisplayMedia(displayMediaOptions(screen)):
         await capture.getUserMedia(kind==="cam"?{video:{deviceId:prefs.camera?{exact:prefs.camera}:undefined,height:{ideal:720},frameRate:{ideal:30}}}:microphoneConstraints(prefs));
       const screenTrack=kind==="screen"?stream.getVideoTracks()[0]:undefined;
-      if(screenTrack && screen.maximum)await applyNativeCapture(screenTrack).catch(()=>{});
+      if(screenTrack && screen.maximum)await applyNativeCapture(screenTrack,screen.fps).catch(()=>{});
       if(encoders)this.encoders=await encoders;
       if(this.closed){stream.getTracks().forEach(track=>track.stop());return;}
       if(kind==="voice" && !stream.getAudioTracks().some(track=>track.readyState==="live")){
