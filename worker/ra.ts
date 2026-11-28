@@ -1,3 +1,6 @@
+import { EMAIL_HEADER, ID_HEADER, signOutPath } from "./identity.ts";
+import { allow, dailyUploadBytes, readLimits } from "./limits.ts";
+
 type Value = string | number | null;
 type User = { id:string; username:string; name:string; state:string; role:string; status:string; seen:number; avatar:string|null; epoch:number; prefs:string };
 type Channel = { id:string; kind:string; server:string|null; name:string; permission:string; category:string; description:string; position:number };
@@ -19,6 +22,17 @@ function deny(status:number, message:string):never { throw new Problem(status,me
 function string(value:unknown, max:number, min=1) {
   if (typeof value !== "string" || value.trim().length < min || value.length > max) deny(400,"Invalid input.");
   return value.trim();
+}
+// Display text with control, invisible and bidi-override characters removed, so a name cannot
+// hide characters or reorder itself to look like someone else's.
+function label(value:unknown, max:number, min=1) {
+  if (typeof value!=="string") deny(400,"Invalid input.");
+  return string(value.normalize("NFKC").replace(/[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]/gu,"").replace(/\s+/gu," "),max,min);
+}
+// A display name may not copy another member's display name or username.
+async function nameTaken(db:D1Database, name:string, self:string) {
+  const key=name.toLowerCase();
+  return !!await db.prepare("SELECT 1 FROM users WHERE id<>? AND state<>'deleted' AND (lower(name)=? OR username=?)").bind(self,key,key).first();
 }
 function number(value:unknown, fallback=0) {
   const result = Number(value ?? fallback);
@@ -62,9 +76,14 @@ async function route(request:Request, env:Cloudflare.Env):Promise<Response> {
   const write=request.method==="POST";
   if (!write && request.method!=="GET") deny(405,"Method unsupported.");
   if (write && request.headers.get("origin")!==url.origin) deny(403,"This request must come from RaRRcord.");
-  const id=request.headers.get("oai-authenticated-user-id");
-  const email=request.headers.get("oai-authenticated-user-email");
-  if (!id || !email) deny(401,"Continue with ChatGPT to sign in.");
+  // Set only by worker/identity.ts after it verifies the sign-in.
+  const id=request.headers.get(ID_HEADER);
+  const email=request.headers.get(EMAIL_HEADER);
+  if (!id || !email) deny(401,"Sign in to use RaRRcord.");
+  if (!write) {
+    const bucket=path==="history" && q.get("search")?.trim() ? "search" : path;
+    if (!allow(id+":"+bucket,readLimits[bucket]??60,now)) deny(429,"Please slow down.");
+  }
   const db=env.DB;
   if (!db) deny(503,"Database binding unavailable.");
   const sql=(query:string,...values:Value[])=>db.prepare(query).bind(...values);
@@ -101,9 +120,10 @@ async function route(request:Request, env:Cloudflare.Env):Promise<Response> {
     if (!user) {
       const owner=!!env.RARRCORD_OWNER_EMAIL && email.toLowerCase()===env.RARRCORD_OWNER_EMAIL.trim().toLowerCase();
       const username=string(body.username,24,3).toLowerCase();
-      const name=string(body.name ?? username,40);
+      const name=label(body.name ?? username,40);
+      if (await nameTaken(db,name,id)) deny(409,"Another member already uses that name.");
       if (!/^[a-z0-9_]+$/.test(username)) deny(400,"Use letters, numbers and underscores.");
-      if (await one("SELECT 1 FROM users WHERE username=?",username)) deny(409,"Username already taken.");
+      if (await one("SELECT 1 FROM users WHERE username=? OR lower(name)=?",username,username)) deny(409,"Username already taken.");
       const statements=[
         sql("INSERT OR IGNORE INTO servers(id,name) VALUES('community','Community')"),
         ...seed.map(([cid,title,kind],i)=>sql("INSERT OR IGNORE INTO channels(id,server,name,kind,category,position) VALUES(?,'community',?,?,?,?)",cid,title,kind,kind==="text"?"Text channels":"Voice rooms",i)),
@@ -127,7 +147,7 @@ async function route(request:Request, env:Cloudflare.Env):Promise<Response> {
     }
     if (!user) deny(409,"Account initialization failed.");
     if (user.state!=="approved") return json({user:view(user),active:false});
-    if (rawSession && !await validSession(user)) deny(401,"Session revoked or expired. Sign out, then continue with ChatGPT again.");
+    if (rawSession && !await validSession(user)) deny(401,"Session revoked or expired. Sign out, then sign in again.");
     if (await validSession(user)) return json({user:view(user),active:true});
     const newSession=token();
     await db.batch([
@@ -139,7 +159,7 @@ async function route(request:Request, env:Cloudflare.Env):Promise<Response> {
   if (path==="logout" && write) {
     if (sessionKey) await run("DELETE FROM sessions WHERE uid=? AND token=?",id,sessionKey);
     if (user) await run("DELETE FROM voice WHERE uid=?",id);
-    return json({},200,{"set-cookie":cookie("",0)});
+    return json({signOut:signOutPath(env)},200,{"set-cookie":cookie("",0)});
   }
   if (!user || user.state!=="approved" || !live) deny(403,"Your RaRRcord session does not have access.");
   const account=user;
@@ -296,8 +316,13 @@ async function route(request:Request, env:Cloudflare.Env):Promise<Response> {
     if (!env.BUCKET) deny(503,"File storage unavailable.");
     const config=await one<{value:string}>("SELECT value FROM settings WHERE key='upload'");
     const limit=path==="avatar"?2097152:Math.min(Number(config?.value??8000000),20000000);
-    const length=Number(request.headers.get("content-length")??0);
+    // Without a length the whole body would be buffered before the size check below.
+    const length=Number(request.headers.get("content-length"));
+    if (!request.headers.has("content-length") || !Number.isSafeInteger(length)) deny(411,"Upload length required.");
     if (length>limit+30000) deny(413,"File too large.");
+    const today=Math.floor(now/day);
+    const used=await one<{hits:number}>("SELECT hits FROM rate WHERE uid=? AND bucket='bytes' AND minute=?",id,today);
+    if ((used?.hits??0)+length>dailyUploadBytes) deny(413,"Daily upload limit reached. Try again tomorrow.");
     const data=await request.formData();
     const file=data.get("file");
     if (!file || typeof file==="string" || !file.size || file.size>limit) deny(413,"File missing or too large.");
@@ -317,13 +342,19 @@ async function route(request:Request, env:Cloudflare.Env):Promise<Response> {
     if (media==="image/gif" && !/\.gif$/i.test(filename)) filename=filename.slice(0,176)+".gif";
     const key=token();
     await env.BUCKET.put(key,file.stream(),{httpMetadata:{contentType:media}});
+    // Counts toward today's upload allowance; "minute" holds the day number for this bucket.
+    const tally=sql("INSERT INTO rate(uid,bucket,minute,hits) VALUES(?,'bytes',?,?) ON CONFLICT(uid,bucket) DO UPDATE SET hits=CASE WHEN minute=excluded.minute THEN hits+excluded.hits ELSE excluded.hits END, minute=excluded.minute",id,today,file.size);
     try {
       if (c) await db.batch([
         sql("INSERT INTO messages(channel,uid,body,attachment,filename,reply,created) VALUES(?,?,?,?,?,?,?)",c.id,id,caption,key,filename,reply,now),
         sql("INSERT INTO events(channel,mid,time) VALUES(?,last_insert_rowid(),?)",c.id,now),
         sql("DELETE FROM typing WHERE channel=? AND uid=?",c.id,id),
+        tally,
       ]);
-      else await run("UPDATE users SET avatar=? WHERE id=?",key,id);
+      else {
+        await db.batch([sql("UPDATE users SET avatar=? WHERE id=?",key,id),tally]);
+        if (account.avatar) await env.BUCKET.delete(account.avatar);
+      }
     } catch(error) {
       await env.BUCKET.delete(key);
       throw error;
@@ -349,6 +380,7 @@ async function route(request:Request, env:Cloudflare.Env):Promise<Response> {
     const m=await one<{uid:string;attachment:string|null}>("SELECT uid,attachment FROM messages WHERE channel=? AND id=? AND deleted=0",c.id,mid);
     if (!m) deny(404,"Message unavailable.");
     if (action==="react") {
+      await checkMessageTarget(c,null);
       const emoji=string(body.emoji,64);
       if (!unicodeEmoji.test(emoji)) deny(400,"Invalid reaction.");
       await db.batch([body.remove?sql("DELETE FROM reactions WHERE mid=? AND uid=? AND emoji=?",mid,id,emoji):
@@ -382,7 +414,8 @@ async function route(request:Request, env:Cloudflare.Env):Promise<Response> {
   }
   if (path==="profile") {
     await throttle(path,12);
-    const name=string(body.name,40);
+    const name=label(body.name,40);
+    if (await nameTaken(db,name,id)) deny(409,"Another member already uses that name.");
     const status=string(body.status,10);
     if (!["online","idle","dnd","offline"].includes(status)) deny(400,"Invalid status.");
     const prefs=JSON.stringify(body.prefs??{});
@@ -405,8 +438,10 @@ async function route(request:Request, env:Cloudflare.Env):Promise<Response> {
       if (!person) deny(403,"Member unavailable for direct messaging.");
       names.push(person.name);
     }
+    // Nobody in a group may have blocked anyone else in it.
+    if (ids.length>1 && await one("SELECT 1 FROM blocks WHERE uid IN (SELECT value FROM json_each(?)) AND blocked IN (SELECT value FROM json_each(?))",JSON.stringify(ids),JSON.stringify(ids))) deny(403,"Member unavailable for direct messaging.");
     const dm=await digest(JSON.stringify([id,...ids].sort()));
-    await db.batch([sql("INSERT OR IGNORE INTO channels(id,name,kind,category) VALUES(?,?,'dm','Direct messages')",dm,string(body.name??names.join(", ").slice(0,80),80)),
+    await db.batch([sql("INSERT OR IGNORE INTO channels(id,name,kind,category) VALUES(?,?,'dm','Direct messages')",dm,label(body.name??names.join(", ").slice(0,80),80)),
       ...[id,...ids].map(uid=>sql("INSERT OR IGNORE INTO channel_members(channel,uid) VALUES(?,?)",dm,uid))]);
     return json({id:dm});
   }
@@ -450,6 +485,17 @@ async function route(request:Request, env:Cloudflare.Env):Promise<Response> {
     const commands:D1PreparedStatement[]=[];
     const key=crypto.randomUUID();
     let invitation:string|undefined;
+    // Files to remove from storage once the database changes are committed.
+    let files:string[]=[];
+    // Everything stored for the channels a query selects, so deleting a channel leaves nothing behind.
+    const purge=async (channelQuery:string, value:string)=>{
+      files=(await all<{attachment:string}>("SELECT attachment FROM messages WHERE attachment IS NOT NULL AND channel IN ("+channelQuery+")",value)).map(r=>r.attachment);
+      const scoped=(table:string, column="channel")=>sql("DELETE FROM "+table+" WHERE "+column+" IN ("+channelQuery+")",value);
+      commands.push(
+        sql("DELETE FROM reactions WHERE mid IN (SELECT id FROM messages WHERE channel IN ("+channelQuery+"))",value),
+        scoped("messages"),scoped("events"),scoped("reads"),scoped("typing"),scoped("channel_members"),scoped("signals"),scoped("voice"),
+      );
+    };
     if (action==="account") {
       const state=string(body.state,16);
       const role=string(body.role,16);
@@ -461,18 +507,22 @@ async function route(request:Request, env:Cloudflare.Env):Promise<Response> {
       if (downgrade && !await one("SELECT 1 FROM users WHERE id<>? AND role='admin' AND state='approved'",target)) deny(409,"Keep at least one active administrator.");
       commands.push(sql("UPDATE users SET state=?,role=?,epoch=epoch+1 WHERE id=? AND (role<>'admin' OR (?='approved' AND ?='admin') OR EXISTS (SELECT 1 FROM users WHERE id<>? AND role='admin' AND state='approved'))",state,role,target,state,role,target));
       commands.push(sql("DELETE FROM sessions WHERE uid=?",target),sql("DELETE FROM voice WHERE uid=?",target));
-      if (state==="deleted") commands.push(sql("UPDATE users SET name='Deleted user', avatar=NULL,prefs='{}' WHERE id=?",target));
+      if (state==="deleted") {
+        commands.push(sql("UPDATE users SET name='Deleted user', avatar=NULL,prefs='{}' WHERE id=?",target));
+        if (existing.avatar) files.push(existing.avatar);
+      }
     } else if (action==="revoke") {
       commands.push(sql("UPDATE users SET epoch=epoch+1 WHERE id=?",target),sql("DELETE FROM sessions WHERE uid=?",target),sql("DELETE FROM voice WHERE uid=?",target));
     } else if (action==="disconnect") commands.push(sql("DELETE FROM voice WHERE uid=?",target));
     else if (action==="server") {
-      const name=string(body.name,60);
+      const name=label(body.name,60);
       if (target) commands.push(sql("UPDATE servers SET name=?,icon=? WHERE id=?",name,string(body.icon??"",4,0),target));
       else commands.push(sql("INSERT INTO servers(id,name,icon) VALUES(?,?,?)",key,name,string(body.icon??"",4,0)),sql("INSERT INTO members(server,uid) VALUES(?,?)",key,id));
     } else if (action==="server_delete") {
+      await purge("SELECT id FROM channels WHERE server=?",target);
       commands.push(sql("DELETE FROM channels WHERE server=?",target),sql("DELETE FROM members WHERE server=?",target),sql("DELETE FROM roles WHERE server=?",target),sql("DELETE FROM invites WHERE server=?",target),sql("DELETE FROM servers WHERE id=?",target));
     } else if (action==="channel") {
-      const server=string(body.server,64), name=string(body.name,60), kind=string(body.kind,12);
+      const server=string(body.server,64), name=label(body.name,60), kind=string(body.kind,12);
       if (!["text","voice","private"].includes(kind) || !await one("SELECT 1 FROM servers WHERE id=?",server)) deny(400,"Invalid channel.");
       if (target && !await one("SELECT 1 FROM channels WHERE id=? AND server=? AND kind<>'dm'",target,server)) deny(404,"Channel unavailable.");
       const args:Value[]=[name,kind,string(body.category??"",40,0),string(body.description??"",200,0),string(body.permission??"",32,0),number(body.position)];
@@ -491,7 +541,10 @@ async function route(request:Request, env:Cloudflare.Env):Promise<Response> {
       const [item]=rows.splice(from,1);
       rows.splice(to,0,item);
       commands.push(...rows.map((row,i)=>sql("UPDATE channels SET position=? WHERE id=? AND server=?",i,row.id,server)));
-    } else if (action==="channel_delete") commands.push(sql("DELETE FROM channels WHERE id=? AND kind<>'dm'",target));
+    } else if (action==="channel_delete") {
+      await purge("SELECT id FROM channels WHERE id=? AND kind<>'dm'",target);
+      commands.push(sql("DELETE FROM channels WHERE id=? AND kind<>'dm'",target));
+    }
     else if (action==="role") {
       const server=string(body.server,64), role=string(body.role,32);
       if (!await one("SELECT 1 FROM servers WHERE id=?",server)) deny(404,"Server unavailable.");
@@ -514,6 +567,8 @@ async function route(request:Request, env:Cloudflare.Env):Promise<Response> {
     } else deny(400,"Invalid administration action.");
     commands.push(audit(action,target||key));
     await db.batch(commands);
+    // R2 deletes at most 1000 keys per call.
+    for (let i=0;i<files.length;i+=1000) await env.BUCKET?.delete(files.slice(i,i+1000));
     return json({invitation,id:key});
   }
   deny(404,"Unknown operation.");
