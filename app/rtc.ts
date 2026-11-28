@@ -1,5 +1,6 @@
 import { request, type Preferences } from "./ra-client";
 import { microphoneConstraints, processVoice, type VoiceProcessor } from "./noise-suppression";
+import { meter, prepareMeters, type SpeakingMeter } from "./speaking";
 import { displayMediaOptions, encoderFrameRate, probeEncoders, screenShareSettings, applyNativeCapture, videoCodecPreferences } from "./screen-share";
 export type Participant={uid:string;peer:string;name:string;cam:number;screen:number};
 type Medium="voice"|"cam"|"screen";
@@ -33,15 +34,16 @@ export class Call {
   muted=false;
   deaf=false;
   context?:AudioContext;
-  meter?:number;
+  private localMeter?:SpeakingMeter;
+  // What the meter hears on the outgoing voice; shown only while the mic is actually sending.
+  private voiceHeard=false;
   // Mic → denoiser → voice gate. local.get("voice") holds its output; the device stream is kept here.
   private voice?:{raw:MediaStream;processor:VoiceProcessor};
   pressed=false;
   private closed=false;
   // Remote speaking is measured from each peer's incoming voice audio, so it needs no signaling.
   private ears?:AudioContext;
-  private earTimer?:number;
-  private hearing=new Map<string,{stream:MediaStream;analyser:AnalyserNode;source:MediaStreamAudioSourceNode;silent:number}>();
+  private hearing=new Map<string,{stream:MediaStream;source:MediaStreamAudioSourceNode;meter?:SpeakingMeter;closed:boolean}>();
   private feedKeys="";
   private roster="";
   private starting=new Set<Medium>();
@@ -148,45 +150,47 @@ export class Call {
       this.refresh();
     };
     this.publish(link,"voice");
-    this.listen();
   }
-  private listen(){
-    if(this.earTimer!==undefined || this.closed || typeof AudioContext==="undefined")return;
-    try{this.ears=new AudioContext();void this.ears.resume();}catch{return;}
-    const samples=new Uint8Array(512);
-    this.earTimer=window.setInterval(()=>{
-      const ears=this.ears;
-      if(!ears)return;
-      if(ears.state==="suspended")void ears.resume().catch(()=>{});
-      let changed=false;
-      for(const [peer,ear] of this.hearing)if(!this.links.has(peer)){ear.source.disconnect();this.hearing.delete(peer);}
-      for(const [peer,link] of this.links){
-        const stream=[...link.incoming].find(([id,s])=>link.labels[id]==="voice"&&s.getAudioTracks().length>0)?.[1];
-        let ear=this.hearing.get(peer);
-        if(ear && ear.stream!==stream){ear.source.disconnect();this.hearing.delete(peer);ear=undefined;}
-        if(!ear && stream){
-          try{
-            const analyser=ears.createAnalyser();
-            analyser.fftSize=samples.length;
-            const source=ears.createMediaStreamSource(stream);
-            source.connect(analyser);
-            ear={stream,analyser,source,silent:0};
-            this.hearing.set(peer,ear);
-          }catch{continue;}
-        }
-        let talking=false;
-        if(ear){
-          ear.analyser.getByteTimeDomainData(samples);
-          const rms=Math.sqrt(samples.reduce((sum,n)=>sum+((n-128)/128)**2,0)/samples.length);
-          talking=rms>this.prefs.sensitivity/100;
-          if(talking)ear.silent=0;else ear.silent++;
-          if(!talking&&ear.silent<3)continue;
-        }
-        if(talking!==link.speaking){link.speaking=talking;changed=true;}
-        if(talking&&this.focus!==peer){this.focus=peer;changed=true;}
-      }
-      if(changed)this.changed();
-    },200);
+  private voiceStream(link:Link){
+    return [...link.incoming].find(([id,stream])=>link.labels[id]==="voice"&&stream.getAudioTracks().some(t=>t.readyState==="live"))?.[1];
+  }
+  // Starts a speaking meter for each voice we receive and stops the ones that went away.
+  private hear(){
+    if(this.closed || typeof AudioContext==="undefined")return;
+    if(!this.ears){
+      try{this.ears=new AudioContext();prepareMeters(this.ears);}catch{return;}
+    }
+    const ears=this.ears;
+    // Created outside a click, the context starts suspended; every poll tries again until the page has been used.
+    if(ears.state==="suspended")void ears.resume().catch(()=>{});
+    for(const [peer,ear] of this.hearing){
+      const link=this.links.get(peer);
+      if(link && this.voiceStream(link)===ear.stream)continue;
+      this.deafen(peer);
+      if(link?.speaking){link.speaking=false;this.changed();}
+    }
+    for(const [peer,link] of this.links){
+      const stream=this.voiceStream(link);
+      if(!stream || this.hearing.has(peer))continue;
+      let source:MediaStreamAudioSourceNode;
+      try{source=ears.createMediaStreamSource(stream);}catch{continue;}
+      const ear:{stream:MediaStream;source:MediaStreamAudioSourceNode;meter?:SpeakingMeter;closed:boolean}={stream,source,closed:false};
+      this.hearing.set(peer,ear);
+      void meter(ears,source,this.prefs.sensitivity,speaking=>{
+        if(ear.closed || link.speaking===speaking)return;
+        link.speaking=speaking;
+        if(speaking)this.focus=peer;
+        this.changed();
+      }).then(m=>{if(ear.closed)m.close();else ear.meter=m;},()=>{});
+    }
+  }
+  private deafen(peer:string){
+    const ear=this.hearing.get(peer);
+    if(!ear)return;
+    ear.closed=true;
+    ear.meter?.close();
+    try{ear.source.disconnect();}catch{/* already gone */}
+    this.hearing.delete(peer);
   }
   private async receive(link:Link, data:Wire) {
     const pc=link.pc;
@@ -264,6 +268,7 @@ export class Call {
     }
   }
   private refresh(force=true){
+    this.hear();
     const feeds:Feed[]=[];
     for(const [peer,link] of this.links) for(const [id,stream] of link.incoming){
       const kind=link.labels[id];
@@ -293,7 +298,17 @@ export class Call {
   get microphoneActive(){return !this.muted&&!this.deaf&&(this.local.get("voice")?.getAudioTracks().some(track=>track.readyState==="live")??false);}
   setMuted(value:boolean){this.muted=value;this.micState();this.changed();}
   setDeaf(value:boolean){this.deaf=value;this.micState();this.changed();}
-  private micState(){for(const track of this.local.get("voice")?.getTracks()??[])track.enabled=!this.muted&&!this.deaf&&(!this.prefs.ptt||this.pressed);}
+  private micState(){
+    const sending=!this.muted&&!this.deaf&&(!this.prefs.ptt||this.pressed);
+    for(const track of this.local.get("voice")?.getTracks()??[])track.enabled=sending;
+    this.showLocalSpeaking();
+  }
+  private showLocalSpeaking(){
+    const speaking=this.voiceHeard && !!this.local.get("voice")?.getAudioTracks().some(track=>track.enabled&&track.readyState==="live");
+    if(speaking===this.localSpeaking)return;
+    this.localSpeaking=speaking;
+    this.changed();
+  }
   startMicrophone(){
     if(this.closed || this.microphonePending || this.local.has("voice"))return Promise.resolve();
     this.starting.add("voice");
@@ -378,34 +393,26 @@ export class Call {
     this.voice=undefined;
   }
   private meterVoice(stream:MediaStream){
+    // Measure what is actually sent (after the denoiser and voice gate), so typing the gate removes does not light the ring.
+    const processor=this.voice?.processor;
+    let context:AudioContext, source:AudioNode;
     try{
-      // Measure what is actually sent, so typing that the gate removes does not light up the speaking ring.
-      const processor=this.voice?.processor;
-      const shared=processor?.context && processor.output;
-      const context=shared?processor.context!:(this.context=new AudioContext());
-      void context.resume();
-      const analyser=context.createAnalyser();
-      analyser.fftSize=512;
-      if(shared)processor.output!.connect(analyser);
-      else context.createMediaStreamSource(stream).connect(analyser);
-      const samples=new Uint8Array(analyser.fftSize);
-      let silent=0;
-      this.meter=window.setInterval(()=>{
-        analyser.getByteTimeDomainData(samples);
-        const rms=Math.sqrt(samples.reduce((sum,n)=>sum+((n-128)/128)**2,0)/samples.length);
-        const talking=rms>this.prefs.sensitivity/100 && !!stream.getAudioTracks()[0]?.enabled;
-        if(talking)silent=0;else silent++;
-        if((talking||silent>=3)&&talking!==this.localSpeaking){
-          this.localSpeaking=talking;
-          this.changed();
-        }
-      },200);
-    }catch{}
+      if(processor?.context && processor.output){context=processor.context;source=processor.output;}
+      else{context=this.context=new AudioContext();source=context.createMediaStreamSource(stream);}
+      void context.resume().catch(()=>{});
+    }catch{return;}
+    void meter(context,source,this.prefs.sensitivity,speaking=>{
+      if(this.local.get("voice")!==stream)return;
+      this.voiceHeard=speaking;
+      this.showLocalSpeaking();
+    }).then(m=>{if(this.local.get("voice")===stream && !this.closed)this.localMeter=m;else m.close();},()=>{});
   }
   private stopMeter(){
-    window.clearInterval(this.meter);
+    this.localMeter?.close();
+    this.localMeter=undefined;
     if(this.context)void this.context.close().catch(()=>{});
     this.context=undefined;
+    this.voiceHeard=false;
     this.localSpeaking=false;
   }
   async metrics():Promise<Metrics[]>{
@@ -457,9 +464,7 @@ export class Call {
     window.removeEventListener("blur",this.release);
     this.stopMeter();
     this.releaseVoice();
-    window.clearInterval(this.earTimer);
-    for(const ear of this.hearing.values())ear.source.disconnect();
-    this.hearing.clear();
+    for(const peer of [...this.hearing.keys()])this.deafen(peer);
     if(this.ears)void this.ears.close().catch(()=>{});
     this.ears=undefined;
     for(const stream of this.local.values())stream.getTracks().forEach(track=>track.stop());
