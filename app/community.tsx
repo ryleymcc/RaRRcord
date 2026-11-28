@@ -1,6 +1,6 @@
 "use client";
 import { Fragment,memo,useCallback,useEffect,useLayoutEffect,useRef,useState, type ClipboardEvent, type FormEvent, type HTMLAttributes, type ReactNode } from "react";
-import { AudioLines, Expand, HeadphoneOff, LayoutGrid, Maximize2, MonitorOff, PhoneOff, VideoOff, Volume2, VolumeX, Eye, EyeOff, ChevronDown, CircleHelp, Copy, CornerUpLeft, Ellipsis, Flag, Headphones, Hash, LockKeyhole, LogOut, Menu, MessageSquare, Mic, MicOff, MonitorUp, Paperclip, ArrowDown, Download, FileText, Pencil, Pin, Plus, Reply, Search, Send, Settings, Shield, Smile, SmilePlus, Trash2, Users, Video, X } from "lucide-react";
+import { AudioLines, Expand, HeadphoneOff, LayoutGrid, Maximize2, MonitorOff, PhoneOff, VideoOff, Volume2, VolumeX, Eye, EyeOff, ChevronDown, CircleHelp, Copy, CornerUpLeft, Ellipsis, Flag, Headphones, Hash, LockKeyhole, LogOut, Menu, MessageSquare, Mic, MicOff, MonitorUp, Paperclip, ArrowDown, Download, FileText, Pencil, Pin, Plus, Reply, Search, Send, Settings, Signal as SignalBars, UserPlus, Shield, Smile, SmilePlus, Trash2, Users, Video, X } from "lucide-react";
 import { ConfirmHost, Modal, confirmAction } from "./dialog";
 import { friendlyError } from "./friendly-error";
 import { useMedia } from "./use-media";
@@ -11,16 +11,16 @@ import { cleanAnnouncements, joinAnnouncement, playVoiceCue, speakAnnouncement }
 import { canBoost, route, setGain, type Route, loadScreenPreview, loadVolumes, maxVolume, saveScreenPreview, setVolume, streamVolumeKey } from "./user-volume";
 import { microphoneConstraints, preloadVoice, processVoice, suppressionMode, suppressionModes, type VoiceProcessor } from "./noise-suppression";
 import { VoiceSession, codecs, iceServers, type Call, type Feed, type Metrics, type Participant, type Signal } from "./rtc";
-import { request, defaults, qualities, serverPictureUrl, serverBackground, type Channel, type Message, type Person, type Preferences, type Server } from "./ra-client";
+import { request, defaults, qualities, appLogoUrl, serverPictureUrl, serverBackground, type Channel, type Message, type Person, type Preferences, type Server } from "./ra-client";
 import Admin from "./ra-admin";
 import { DiagnosticCharts, WebRtcInternals } from "./diagnostic-charts";
 import { diagnosticSample, type DiagnosticSample } from "./diagnostic-data";
 import EmojiPicker from "./emoji-picker";
 
-type Workspace={servers:Server[]; channels:Channel[]; people:Person[]; settings:{key:string;value:string}[];prefs:Partial<Preferences>;moderates?:string[];timeouts?:{server:string;uid:string;timeout:number}[]};
+type Workspace={servers:Server[]; channels:Channel[]; logo?:string|null; people:Person[]; settings:{key:string;value:string}[];prefs:Partial<Preferences>;moderates?:string[];timeouts?:{server:string;uid:string;timeout:number}[]};
 type Auth={user:Person|null;active:boolean;ownerConfigured?:boolean};
 type History={messages:Message[];cursor:number};
-type RoomMember={channel:string;uid:string;name:string;has_avatar:boolean;cam:number;screen:number};
+type RoomMember={channel:string;uid:string;name:string;has_avatar:boolean;cam:number;screen:number;joined?:number};
 type Update={messages?:Message[];cursor?:number;typing?:{name:string}[];voice?:Participant[]|null;signals?:Signal[];rooms?:RoomMember[];room?:string;moved?:boolean};
 const day=(v:number)=>new Date(v).toLocaleDateString(undefined,{weekday:"long",month:"long",day:"numeric"});
 const clock=(v:number)=>new Date(v).toLocaleTimeString(undefined,{hour:"numeric",minute:"2-digit"});
@@ -43,6 +43,15 @@ function VoiceMembers({members,movable,dropProps,manage}:{members:VoiceMember[];
     onContextMenu={manage?e=>{e.preventDefault();manage(m.uid);}:undefined}>
     <Avatar name={m.name} uid={m.uid} has={m.avatar}/><span>{m.name}</span>{m.cam&&<Video size={13} aria-label="Camera on"/>}{m.live&&<b className="live-tag">LIVE</b>}
   </li>)}</ul>;
+}
+// How long a voice room's call has been going, ticking every second like Discord's channel timer.
+function CallTimer({since}:{since:number}){
+  const [now,setNow]=useState(()=>Date.now());
+  useEffect(()=>{const timer=setInterval(()=>setNow(Date.now()),1000);return ()=>clearInterval(timer);},[]);
+  const total=Math.max(0,Math.floor((now-since)/1000));
+  const h=Math.floor(total/3600), m=Math.floor(total/60)%60, sec=total%60;
+  const two=(n:number)=>String(n).padStart(2,"0");
+  return <time className="call-timer" aria-label="Call length">{h?h+":"+two(m):m}:{two(sec)}</time>;
 }
 type RowActions={action:(kind:string,m:Message,extra?:object)=>Promise<void>;reply:(m:Message)=>void;pick:(m:Message)=>void;edit:(m:Message)=>void;menu:(id:number|null)=>void;jump:(id:number)=>void;remove:(m:Message)=>void;report:(m:Message)=>void};
 const snippet=(text:string)=>text.replace(/\x60\x60\x60[\s\S]*?(\x60\x60\x60|$)/g,"[code]").replace(/\s+/g," ").trim().slice(0,120);
@@ -399,6 +408,13 @@ export default function Community({localAuth=false}:{localAuth?:boolean}={}){
   const changeVolume=(key:string,value:number)=>setVolumes(v=>setVolume(v,key,value));
   const previewScreen=(on:boolean)=>{saveScreenPreview(on);setScreenPreview(on);};
   const [stage,setStage]=useState(false);
+  const [serverMenu,setServerMenu]=useState(false);
+  // The browser tab shows the app logo once an administrator has uploaded one.
+  const logoVersion=space?.logo;
+  useEffect(()=>{
+    const link=document.querySelector<HTMLLinkElement>("link[rel~=icon]")??Object.assign(document.head.appendChild(document.createElement("link")),{rel:"icon"});
+    link.href=logoVersion?appLogoUrl(logoVersion):"/favicon.svg";
+  },[logoVersion]);
   const [speaker,setSpeaker]=useState(false);
   const [dmUsers,setDmUsers]=useState<string[]>([]);
   const [hasMore,setHasMore]=useState(true);
@@ -811,7 +827,11 @@ export default function Community({localAuth=false}:{localAuth?:boolean}={}){
     }
     return rooms.filter(r=>r.channel===id).map(r=>({uid:r.uid,name:r.name,avatar:!!r.has_avatar,live:!!r.screen,cam:!!r.cam,speaking:false})).sort((a,b)=>a.name.localeCompare(b.name)||a.uid.localeCompare(b.uid));
   };
+  // When a voice room's call started: the earliest join among the people in it now.
+  const roomSince=(id:string)=>{const times=rooms.filter(r=>r.channel===id&&(r.joined??0)>0).map(r=>r.joined!);return times.length?Math.min(...times):undefined;};
   const currentServer=space?.servers.find(s=>s.id===server);
+  const admin=person?.role==="admin";
+  const callServer=space?.servers.find(s=>s.id===space.channels.find(c=>c.id===call?.channel)?.server)?.name;
   // Direct messages belong to no server, so they keep the plain chat colour.
   const backdrop=channel?.kind==="dm"?undefined:serverBackground(currentServer);
   const myTimeout=chatChannel?.server&&person?timeoutOf(person.id,chatChannel.server):undefined;
@@ -833,45 +853,71 @@ export default function Community({localAuth=false}:{localAuth?:boolean}={}){
   const sheetOpen=mobile||(!wide&&membersSheet);
   return <div className={"assembly "+(members?"with-members ":"")+(mobile?"mobile-nav ":"")+(prefs.compact?"compact":"")}>
     <nav className="rail" aria-label="Servers">
-      <button className="mark" aria-label="RaRRcord home" onClick={()=>{const home=space?.servers[0]?.id??"community";setServer(home);setSelected(space?.channels.find(c=>c.server===home&&c.kind==="text")?.id??"");setStage(false);}}>R</button>
+      <div className="rail-item"><button className="mark" aria-label="RaRRcord home" title="Home" onClick={()=>{const home=space?.servers[0]?.id??"community";setServer(home);setSelected(space?.channels.find(c=>c.server===home&&c.kind==="text")?.id??"");setStage(false);}}>{space?.logo?<img src={appLogoUrl(space.logo)} alt=""/>:"R"}</button></div>
       <hr/>
-      {space?.servers.map(s=><button className={"server-pill "+(s.id===server?"selected":"")} key={s.id} title={s.name} aria-label={s.name} onClick={()=>{
-        setServer(s.id);setSelected(space.channels.find(c=>c.server===s.id&&c.kind==="text")?.id??"");setStage(false);
-      }}>{s.picture?<img src={serverPictureUrl(s.id,s.picture)} alt=""/>:s.icon||initials(s.name)}</button>)}
-      {person?.role==="admin"&&<button className="server-pill add" aria-label="Manage servers" title="Manage servers" onClick={()=>setModal("admin")}><Plus size={20}/></button>}
+      {space?.servers.map(s=>{
+        // A white pill marks the open server; a short one marks servers with unread messages.
+        const unread=s.id!==server&&space.channels.some(c=>c.server===s.id&&c.unread>0);
+        return <div key={s.id} className={"rail-item"+(s.id===server?" selected":"")+(unread?" unread":"")}><button className={"server-pill"+(s.id===server?" selected":"")} title={s.name} aria-label={s.name+(unread?", unread messages":"")} aria-current={s.id===server||undefined} onClick={()=>{
+          setServer(s.id);setSelected(space.channels.find(c=>c.server===s.id&&c.kind==="text")?.id??"");setStage(false);setServerMenu(false);
+        }}>{s.picture?<img src={serverPictureUrl(s.id,s.picture)} alt=""/>:s.icon||initials(s.name)}</button></div>;
+      })}
+      {admin&&<div className="rail-item"><button className="server-pill add" aria-label="Manage servers" title="Manage servers" onClick={()=>setModal("admin")}><Plus size={22}/></button></div>}
       <div className="rail-bottom"><IconButton label="Diagnostics" onClick={()=>setModal("diagnostics")}><AudioLines size={19}/></IconButton><IconButton label="Help" onClick={()=>setModal("help")}><CircleHelp size={19}/></IconButton></div>
     </nav>
     <aside className="sidebar">
-      <header className="community-header"><span className="community-tag">RARRCORD</span><h2>{currentServer?.name??"Community"}</h2></header>
+      <header className="community-header">
+        <button type="button" className="server-menu-button" aria-haspopup="menu" aria-expanded={serverMenu} onClick={()=>setServerMenu(!serverMenu)}><h2>{currentServer?.name??"Community"}</h2>{serverMenu?<X size={18}/>:<ChevronDown size={18}/>}</button>
+        {serverMenu&&<><div className="menu-catcher" aria-hidden="true" onClick={()=>setServerMenu(false)}/>
+          <div className="server-menu" role="menu" aria-label={(currentServer?.name??"Server")+" menu"} onKeyDown={e=>{if(e.key==="Escape")setServerMenu(false);}} onClick={()=>setServerMenu(false)}>
+            {admin&&<button role="menuitem" autoFocus className="accent" onClick={()=>setModal("admin")}>Invite people<UserPlus size={17}/></button>}
+            {admin&&<button role="menuitem" onClick={()=>setModal("admin")}>Server settings<Settings size={17}/></button>}
+            <button role="menuitem" autoFocus={!admin} onClick={()=>{setDmUsers([]);setModal("dm");}}>New direct message<MessageSquare size={17}/></button>
+            <hr/>
+            <button role="menuitem" onClick={()=>setModal("settings")}>User settings<Settings size={17}/></button>
+            <button role="menuitem" onClick={()=>setModal("help")}>Help<CircleHelp size={17}/></button>
+          </div></>}
+      </header>
       <div className="channel-list">
         {!space&&<div className="skeleton-list" aria-label="Loading channels">{[60,75,50,0,55,70].map((w,i)=>w?<span key={i} className="skeleton" style={{width:w+"%"}}/>:<br key={i}/>)}</div>}
-        {groups.map(group=><details key={group} open><summary><ChevronDown size={14}/>{group}</summary>{channels.filter(c=>(c.category||"Channels")===group).map(c=><Fragment key={c.id}><button className={"channel "+(selected===c.id?"selected":"")+(dropRoom===c.id?" drop-target":"")} onClick={()=>choose(c)} {...(c.kind==="voice"?dropProps(c):undefined)}>
-          {c.kind==="voice"?<AudioLines size={17}/>:c.kind==="private"?<LockKeyhole size={15}/>:<Hash size={17}/>}<span>{c.name}</span>{c.unread>0&&chatId!==c.id&&<b className="badge">{c.unread>99?"99+":c.unread}</b>}{call?.channel===c.id&&<i className="voice-dot"/>}
-        </button>{c.kind==="voice"&&<VoiceMembers members={membersOf(c.id)} movable={canMove(c)} dropProps={dropProps(c)} manage={canMove(c)?manage:undefined}/>}</Fragment>)}</details>)}
+        {groups.map(group=><details key={group} open><summary><span>{group}</span><ChevronDown size={12}/>{admin&&<button type="button" className="category-add" aria-label={"Manage channels in "+group} title="Manage channels" onClick={e=>{e.preventDefault();e.stopPropagation();setModal("admin");}}><Plus size={16}/></button>}</summary>{channels.filter(c=>(c.category||"Channels")===group).map(c=>{
+          const unread=c.unread>0&&chatId!==c.id;
+          const since=c.kind==="voice"?roomSince(c.id):undefined;
+          return <Fragment key={c.id}><div className="channel-row"><button className={"channel "+(selected===c.id?"selected":"")+(unread&&c.kind!=="dm"?" unread":"")+(call?.channel===c.id?" connected":"")+(dropRoom===c.id?" drop-target":"")} onClick={()=>choose(c)} {...(c.kind==="voice"?dropProps(c):undefined)}>
+            {c.kind==="voice"?<Volume2 size={19}/>:c.kind==="private"?<LockKeyhole size={17}/>:<Hash size={19}/>}<span>{c.name}</span>{unread&&c.kind==="dm"&&<b className="badge">{c.unread>99?"99+":c.unread}</b>}{since&&<CallTimer since={since}/>}
+          </button>{admin&&c.server&&<button type="button" className="channel-gear" aria-label={"Edit channel "+c.name} title="Edit channel" onClick={()=>setModal("admin")}><Settings size={15}/></button>}</div>
+          {c.kind==="voice"&&<VoiceMembers members={membersOf(c.id)} movable={canMove(c)} dropProps={dropProps(c)} manage={canMove(c)?manage:undefined}/>}</Fragment>;
+        })}</details>)}
         <button className="channel dm-button" onClick={()=>{setDmUsers([]);setModal("dm");}}><Plus size={16}/><span>New direct message</span></button>
       </div>
-      {call&&<div className="voice-status"><div><b><i className="voice-dot"/> Voice connected</b><span>{callTitle}</span></div>
-        <span className="voice-actions">
-          <IconButton label={call.local.has("cam")?"Turn off camera":"Turn on camera"} active={call.local.has("cam")} onClick={()=>void call.toggle("cam")}>{call.local.has("cam")?<Video size={18}/>:<VideoOff size={18}/>}</IconButton>
-          <IconButton label={call.local.has("screen")?"Stop sharing your screen":"Share your screen"} active={call.local.has("screen")} onClick={()=>void call.toggle("screen")}>{call.local.has("screen")?<MonitorOff size={18}/>:<MonitorUp size={18}/>}</IconButton>
-          <IconButton label="Disconnect" onClick={()=>voice.disconnect()}><LogOut size={18}/></IconButton>
-        </span></div>}
-      <footer className="profile">
-        {person&&<Avatar name={person.name} uid={person.id} has={person.avatar} status={person.status}/>}
-        <div><b>{person?.name}</b><small>@{person?.username}</small></div>
-        <IconButton label={!call?"Join a voice room to use your microphone":call.microphonePending?"Starting microphone":call.microphoneActive?"Mute microphone":call.local.has("voice")?"Unmute microphone":"Enable microphone"} active={!!call&&!call.microphoneActive} danger={!!call&&!call.microphoneActive} disabled={!call||call.microphonePending||call.deaf} onClick={()=>void call?.toggleMicrophone()}>{!call||call.microphoneActive?<Mic size={16}/>:<MicOff size={16}/>}</IconButton>
-        <IconButton label={!call?"Join a voice room to deafen":call.deaf?"Undeafen":"Deafen"} active={!!call?.deaf} danger={!!call?.deaf} disabled={!call} onClick={()=>{if(call)call.setDeaf(!call.deaf);}}>{call?.deaf?<HeadphoneOff size={16}/>:<Headphones size={16}/>}</IconButton>
-        <IconButton label="User settings" onClick={()=>setModal("settings")}><Settings size={18}/></IconButton>
-      </footer>
+      <div className="user-area">
+        {call&&<div className="voice-status">
+          <div className="voice-status-top">
+            <div className="voice-status-text"><b><SignalBars size={16}/>Voice Connected</b><span title={callTitle}>{callTitle}{callServer?" / "+callServer:""}</span></div>
+            <IconButton label="Disconnect" onClick={()=>voice.disconnect()}><PhoneOff size={18}/></IconButton>
+          </div>
+          <div className="voice-status-actions">
+            <button type="button" className={call.local.has("cam")?"on":""} aria-label={call.local.has("cam")?"Turn off camera":"Turn on camera"} title={call.local.has("cam")?"Turn off camera":"Turn on camera"} aria-pressed={call.local.has("cam")} onClick={()=>void call.toggle("cam")}>{call.local.has("cam")?<Video size={18}/>:<VideoOff size={18}/>}</button>
+            <button type="button" className={call.local.has("screen")?"on":""} aria-label={call.local.has("screen")?"Stop sharing your screen":"Share your screen"} title={call.local.has("screen")?"Stop sharing":"Share your screen"} aria-pressed={call.local.has("screen")} onClick={()=>void call.toggle("screen")}>{call.local.has("screen")?<MonitorOff size={18}/>:<MonitorUp size={18}/>}</button>
+          </div>
+        </div>}
+        <footer className="profile">
+          {person&&<Avatar name={person.name} uid={person.id} has={person.avatar} status={person.status}/>}
+          <div title={person?"@"+person.username:undefined}><b>{person?.name}</b><small>{person?statusLabel(person.status):""}</small></div>
+          <IconButton label={!call?"Join a voice room to use your microphone":call.microphonePending?"Starting microphone":call.microphoneActive?"Mute microphone":call.local.has("voice")?"Unmute microphone":"Enable microphone"} active={!!call&&!call.microphoneActive} danger={!!call&&!call.microphoneActive} disabled={!call||call.microphonePending||call.deaf} onClick={()=>void call?.toggleMicrophone()}>{!call||call.microphoneActive?<Mic size={18}/>:<MicOff size={18}/>}</IconButton>
+          <IconButton label={!call?"Join a voice room to deafen":call.deaf?"Undeafen":"Deafen"} active={!!call?.deaf} danger={!!call?.deaf} disabled={!call} onClick={()=>{if(call)call.setDeaf(!call.deaf);}}>{call?.deaf?<HeadphoneOff size={18}/>:<Headphones size={18}/>}</IconButton>
+          <IconButton label="User settings" onClick={()=>setModal("settings")}><Settings size={18}/></IconButton>
+        </footer>
+      </div>
     </aside>
-    <main className={"conversation"+(backdrop?" has-backdrop":"")} style={backdrop?{background:backdrop}:undefined}>
+    <main className={"conversation"+(backdrop?" has-backdrop":"")+(mainStage?" voice-view":"")} style={backdrop?{background:backdrop}:undefined}>
       <header className="topbar">
         <span className="mobile-toggle"><IconButton label="Toggle navigation" active={mobile} onClick={()=>{setMembersSheet(false);setMobile(!mobile);}}><Menu size={20}/></IconButton></span>
-        <div className="location-title">{mainStage?<AudioLines size={21}/>:<Hash size={22}/>}<h1>{mainStage?callTitle??channel?.name??"Voice room":channel?.name??"Community"}</h1></div>
+        <div className="location-title">{mainStage?<Volume2 size={22}/>:channel?.kind==="private"?<LockKeyhole size={20}/>:<Hash size={22}/>}<h1>{mainStage?callTitle??channel?.name??"Voice room":channel?.name??"Community"}</h1></div>
         <span className="channel-description">{channel?.description}</span>
         <div className="top-actions">
           {call&&!mainStage&&<button className="subtle" onClick={()=>{setFind("");setPinned(false);setStage(true);}}>View call</button>}
-          {mainStage&&voiceRoom&&<button type="button" className={"sidechat-toggle"+(sidechatOpen?" active":"")} aria-expanded={sidechatOpen} aria-controls={sidechatOpen?"voice-sidechat":undefined} onClick={()=>setSidechat(sidechatOpen?"":voiceRoom.id)}><MessageSquare size={17}/><span>Sidechat</span>{!sidechatOpen&&voiceRoom.unread>0&&<b className="badge">{Math.min(voiceRoom.unread,99)}{voiceRoom.unread>99?"+":""}</b>}</button>}
+          {mainStage&&voiceRoom&&<button type="button" className={"sidechat-toggle"+(sidechatOpen?" active":"")} aria-expanded={sidechatOpen} aria-controls={sidechatOpen?"voice-sidechat":undefined} aria-label={sidechatOpen?"Close sidechat":"Open sidechat"} title="Sidechat" onClick={()=>setSidechat(sidechatOpen?"":voiceRoom.id)}><MessageSquare size={20}/>{!sidechatOpen&&voiceRoom.unread>0&&<b className="badge">{Math.min(voiceRoom.unread,99)}{voiceRoom.unread>99?"+":""}</b>}</button>}
           {!mainStage&&<><label className="search"><Search size={16}/><input aria-label="Search messages" value={find} placeholder="Search messages" onChange={e=>setFind(e.target.value)}/></label><IconButton label="Pinned messages" active={pinned} onClick={()=>setPinned(!pinned)}><Pin size={19}/></IconButton></>}
           <IconButton label="Toggle member list" active={members} onClick={()=>{if(wide)setMembersPref(!membersPref);else{setMobile(false);setMembersSheet(!membersSheet);}}}><Users size={20}/></IconButton>
           {person?.role==="admin"&&<IconButton label="Administration" onClick={()=>setModal("admin")}><Shield size={19}/></IconButton>}
@@ -879,8 +925,7 @@ export default function Community({localAuth=false}:{localAuth?:boolean}={}){
       </header>
       <div className={"conversation-body"+(sidechatOpen?" with-sidechat":"")}>
       {mainStage&&<div className="stage">
-        {call?<><div className="stage-head"><div><h2>{callTitle}</h2><p>{call.participants.length===1?"Just you so far":call.participants.length+" connected"}</p></div>
-          {(screens.length>0||call.participants.length>2)&&<button type="button" className="view-toggle" aria-pressed={speaker} onClick={()=>setSpeaker(!speaker)}>{speaker?<><LayoutGrid size={16}/>Grid view</>:<><Maximize2 size={16}/>Focus view</>}</button>}</div>
+        {call?<>{(screens.length>0||call.participants.length>2)&&<div className="stage-head"><button type="button" className="view-toggle" aria-pressed={speaker} onClick={()=>setSpeaker(!speaker)}>{speaker?<><LayoutGrid size={16}/>Grid view</>:<><Maximize2 size={16}/>Focus view</>}</button></div>}
           <div className={"stage-grid"+(speaker?" speaker":"")} data-count={Math.min(screens.length+(ownScreen?1:0)+call.participants.length,5)}>
             {ownScreen&&<StageTile key="own-screen" name="Your screen" uid={call.peer+"-screen"} screen live stream={ownScreen} deaf output={prefs.output} volume={0}
               actions={<button type="button" onClick={()=>previewScreen(false)}><EyeOff size={15}/>Hide preview</button>}/>}
@@ -909,7 +954,15 @@ export default function Community({localAuth=false}:{localAuth?:boolean}={}){
             <button type="button" className="call-button" aria-label="Connection diagnostics" title="Diagnostics" onClick={()=>setModal("diagnostics")}><AudioLines size={20}/></button>
             <button type="button" className="call-button leave" aria-label="Leave call" title="Leave call" onClick={()=>voice.disconnect()}><PhoneOff size={20}/></button>
           </div>
-        </>:<div className="blank"><span className="empty-icon"><AudioLines size={28}/></span><h2>{voiceRoom?.name??"Voice room"}</h2><p>{voiceRoom&&membersOf(voiceRoom.id).length?new Intl.ListFormat(undefined,{type:"conjunction"}).format(membersOf(voiceRoom.id).map(m=>m.name))+" "+(membersOf(voiceRoom.id).length===1?"is":"are")+" here.":"No one is here yet."}</p>{voiceRoom&&<button className="primary" onClick={()=>void join(voiceRoom)}>Join voice room</button>}</div>}
+        </>:<div className="voice-lobby">{(()=>{
+          const here=voiceRoom?membersOf(voiceRoom.id):[];
+          return <>
+            <div className="lobby-faces" aria-hidden="true">{here.length?here.slice(0,5).map(m=><Avatar key={m.uid} name={m.name} uid={m.uid} has={m.avatar}/>):<Volume2 size={34}/>}</div>
+            <h2>{voiceRoom?.name??"Voice room"}</h2>
+            <p>{here.length?new Intl.ListFormat(undefined,{type:"conjunction"}).format(here.map(m=>m.name))+" "+(here.length===1?"is":"are")+" currently in voice":"No one is currently in voice"}</p>
+            {voiceRoom&&<button className="lobby-join" onClick={()=>void join(voiceRoom)}>Join Voice</button>}
+          </>;
+        })()}</div>}
       </div>}
       {(!mainStage||sidechatOpen)&&<section className={"chat-pane"+(sidechatOpen?" voice-sidechat":"")} id={sidechatOpen?"voice-sidechat":undefined} aria-label={sidechatOpen?"Voice channel sidechat":"Channel chat"}
         onDragEnter={e=>{if(chatChannel&&e.dataTransfer.types.includes("Files")){e.preventDefault();setDragging(true);}}}
@@ -973,9 +1026,9 @@ export default function Community({localAuth=false}:{localAuth?:boolean}={}){
     </main>
     {members&&<aside className="members-pane"><div className="members-title"><h2>Members</h2><span>{space?.people.length??""}</span></div>
       {!space&&<div className="skeleton-list members-skel" aria-label="Loading members">{[55,70,45,60].map((w,i)=><div key={i}><span className="skeleton avatar-skel"/><span className="skeleton" style={{width:w+"%"}}/></div>)}</div>}
-      {["online","offline"].map(group=><section key={group}><h3>{group==="online"?"Available":"Offline"}</h3>{space?.people.filter(p=>group==="offline"?p.status==="offline":p.status!=="offline").map(p=><details className="member" key={p.id}><summary><Avatar name={p.name} uid={p.id} has={p.avatar} status={p.status}/><span><b>{p.name}</b><small>@{p.username}{p.role==="admin"?" · Admin":""}{timeoutOf(p.id)?" · Timed out":""}</small></span></summary>
+      {["online","offline"].map(group=>{const people=space?.people.filter(p=>group==="offline"?p.status==="offline":p.status!=="offline")??[];return <section key={group} className={"member-group "+group}><h3>{group==="online"?"Online":"Offline"} — {people.length}</h3>{people.map(p=><details className="member" key={p.id}><summary><Avatar name={p.name} uid={p.id} has={p.avatar} status={p.status}/><span><b>{p.name}</b><small>@{p.username}{p.role==="admin"?" · Admin":""}{timeoutOf(p.id)?" · Timed out":""}</small></span></summary>
         {p.id!==person?.id&&<div className="member-menu"><button onClick={()=>{setDmUsers([p.id]);setModal("dm");}}>Message</button><button onClick={async()=>{try{await request("block",{users:[p.id]});report("Member blocked.");}catch(e){report((e as Error).message);}}}>Block</button><button onClick={()=>void request("block",{users:[p.id],remove:true}).then(()=>report("Member unblocked.")).catch(e=>report(e.message))}>Unblock</button>{space?.moderates?.includes(server)&&p.role!=="admin"&&<button onClick={()=>manage(p.id)}>Moderate</button>}</div>}
-      </details>)}</section>)}
+      </details>)}</section>;})}
     </aside>}
     {sheetOpen&&<div className="scrim" aria-hidden="true" onClick={()=>{setMobile(false);setMembersSheet(false);}}/>}
     <div className="toast-region" role="status" aria-live="polite">{toast&&<div className="toast">{toast}<IconButton label="Dismiss" onClick={()=>setToast("")}><X size={16}/></IconButton></div>}</div>

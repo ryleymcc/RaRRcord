@@ -115,7 +115,7 @@ async function route(request:Request, env:Cloudflare.Env):Promise<Response> {
   const validSession=async (account:User)=> !!sessionKey && !!await one(
     "SELECT token FROM sessions WHERE token=? AND uid=? AND epoch=? AND expires>?",sessionKey,id,account.epoch,now);
   const audit=(action:string, detail:string)=>sql("INSERT INTO audit(uid,action,detail,time) VALUES(?,?,?,?)",id,action,detail,now);
-  const upload = path==="upload" || path==="avatar" || path==="servericon" || path==="serverbackground";
+  const upload = path==="upload" || path==="avatar" || path==="servericon" || path==="serverbackground" || path==="applogo";
   let body:Input={};
   if (write && !upload) {
     if (!request.headers.get("content-type")?.startsWith("application/json")) deny(415,"Expected JSON.");
@@ -220,6 +220,8 @@ async function route(request:Request, env:Cloudflare.Env):Promise<Response> {
       channels:await all("SELECT c.*, (SELECT COUNT(*) FROM messages m WHERE m.channel=c.id AND m.deleted=0 AND m.uid<>? AND m.id>COALESCE((SELECT mid FROM reads WHERE uid=? AND channel=c.id),0)) unread FROM channels c WHERE "+channelAccess("c")+" ORDER BY position,c.name",id,id,...access),
       people:await all("SELECT u.id,u.name,u.username,u.role,u.avatar IS NOT NULL AS avatar,CASE WHEN u.seen<? THEN 'offline' ELSE u.status END status FROM users u WHERE u.state='approved' AND (u.id=? OR ?='admin' OR EXISTS (SELECT 1 FROM members a JOIN members b ON a.server=b.server WHERE a.uid=? AND b.uid=u.id)) ORDER BY u.name COLLATE NOCASE,u.id",now-25000,id,account.role,id),
       settings:await all("SELECT key,value FROM settings WHERE key IN ('bitrate','upload','stun')"),
+      // The app logo's version tag; the storage key itself stays on the server.
+      logo:(await one<{version:string}>("SELECT substr(value,1,8) AS version FROM settings WHERE key='app_logo'"))?.version??null,
       prefs:JSON.parse(account.prefs),
       // Servers where this account may move people between voice rooms.
       // Members currently timed out in servers this account can see, so the app can label them.
@@ -279,7 +281,7 @@ async function route(request:Request, env:Cloudflare.Env):Promise<Response> {
     const rooms=async ()=>{
       if (!q.has("rooms")) return;
       // Everyone currently in a voice room this viewer can see, for the channel sidebar.
-      result.rooms=await all("SELECT v.channel,v.uid,u.name,u.avatar IS NOT NULL AS has_avatar,v.cam,v.screen FROM voice v JOIN users u ON v.uid=u.id JOIN channels c ON v.channel=c.id WHERE v.expires>? AND u.state='approved' AND c.kind='voice' AND "+channelAccess("c")+" AND "+channelAccess("c").replace("ca.uid=?","ca.uid=v.uid").replace("?='admin'","u.role='admin'").replace("ma.uid=?","ma.uid=v.uid")+" AND NOT EXISTS (SELECT 1 FROM blocks b WHERE (b.uid=? AND b.blocked=v.uid) OR (b.uid=v.uid AND b.blocked=?)) ORDER BY v.joined,u.name COLLATE NOCASE,v.uid",now,...access,id,id);
+      result.rooms=await all("SELECT v.channel,v.uid,u.name,u.avatar IS NOT NULL AS has_avatar,v.cam,v.screen,v.joined FROM voice v JOIN users u ON v.uid=u.id JOIN channels c ON v.channel=c.id WHERE v.expires>? AND u.state='approved' AND c.kind='voice' AND "+channelAccess("c")+" AND "+channelAccess("c").replace("ca.uid=?","ca.uid=v.uid").replace("?='admin'","u.role='admin'").replace("ma.uid=?","ma.uid=v.uid")+" AND NOT EXISTS (SELECT 1 FROM blocks b WHERE (b.uid=? AND b.blocked=v.uid) OR (b.uid=v.uid AND b.blocked=?)) ORDER BY v.joined,u.name COLLATE NOCASE,v.uid",now,...access,id,id);
     };
     await Promise.all([seen,chat(),call(),rooms()]);
     return json(result);
@@ -321,9 +323,10 @@ async function route(request:Request, env:Cloudflare.Env):Promise<Response> {
     sockets[1].close(1000,"Probe complete");
     return new Response(null,{status:101,webSocket:sockets[0]});
   }
-  if ((path==="attachment" || path==="avatar" || path==="servericon" || path==="serverbackground") && !write) {
+  if ((path==="attachment" || path==="avatar" || path==="servericon" || path==="serverbackground" || path==="applogo") && !write) {
     if (!env.BUCKET) deny(503,"File storage unavailable.");
-    const key=string(q.get("key"),100);
+    // There is only one app logo, so its URL carries no key.
+    const key=path==="applogo"?"":string(q.get("key"),100);
     let storageKey=key;
     let filename="attachment";
     if (path==="attachment") {
@@ -336,6 +339,11 @@ async function route(request:Request, env:Cloudflare.Env):Promise<Response> {
       const row=await one<{picture:string|null}>("SELECT s.picture FROM servers s WHERE s.id=? AND (?='admin' OR EXISTS (SELECT 1 FROM members WHERE server=s.id AND uid=?))",key,account.role,id);
       if (!row?.picture) deny(404,"Server picture unavailable.");
       storageKey=row.picture;
+    } else if (path==="applogo") {
+      // Every approved member sees the app logo, so anyone signed in may load it.
+      const row=await one<{value:string}>("SELECT value FROM settings WHERE key='app_logo'");
+      if (!row?.value) deny(404,"App logo unavailable.");
+      storageKey=row.value;
     } else if (path==="serverbackground") {
       // Same rule as the server picture: only people who can see the server can load its background.
       const row=await one<{background:string|null}>("SELECT s.background FROM servers s WHERE s.id=? AND (?='admin' OR EXISTS (SELECT 1 FROM members WHERE server=s.id AND uid=?))",key,account.role,id);
@@ -369,10 +377,10 @@ async function route(request:Request, env:Cloudflare.Env):Promise<Response> {
     });
   }
   if (!write) deny(404,"Unknown operation.");
-  if (path==="upload" || path==="avatar" || path==="servericon" || path==="serverbackground") {
+  if (path==="upload" || path==="avatar" || path==="servericon" || path==="serverbackground" || path==="applogo") {
     // Server pictures and backgrounds are both per-server images that only administrators may change.
     const serverImage=path==="servericon" || path==="serverbackground";
-    if (serverImage && !admin) deny(403,"Administrator access required.");
+    if ((serverImage || path==="applogo") && !admin) deny(403,"Administrator access required.");
     await throttle(path,18);
     if (!env.BUCKET) deny(503,"File storage unavailable.");
     const config=await one<{value:string}>("SELECT value FROM settings WHERE key='upload'");
@@ -418,6 +426,10 @@ async function route(request:Request, env:Cloudflare.Env):Promise<Response> {
         const old=await one<{picture:string|null}>("SELECT picture FROM servers WHERE id=?",serverId);
         await db.batch([sql("UPDATE servers SET picture=? WHERE id=?",key,serverId),sql("INSERT INTO audit(uid,action,detail,time) VALUES(?,?,?,?)",id,"server_picture",serverId,now),tally]);
         if (old?.picture) await env.BUCKET.delete(old.picture);
+      } else if (path==="applogo") {
+        const old=await one<{value:string}>("SELECT value FROM settings WHERE key='app_logo'");
+        await db.batch([sql("INSERT INTO settings(key,value) VALUES('app_logo',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",key),sql("INSERT INTO audit(uid,action,detail,time) VALUES(?,?,?,?)",id,"app_logo","uploaded",now),tally]);
+        if (old?.value) await env.BUCKET.delete(old.value);
       } else if (path==="serverbackground") {
         const old=await one<{background:string|null}>("SELECT background FROM servers WHERE id=?",serverId);
         await db.batch([sql("UPDATE servers SET background=? WHERE id=?",key,serverId),sql("INSERT INTO audit(uid,action,detail,time) VALUES(?,?,?,?)",id,"server_background",serverId,now),tally]);
@@ -662,6 +674,10 @@ async function route(request:Request, env:Cloudflare.Env):Promise<Response> {
       const name=label(body.name,60);
       if (target) commands.push(sql("UPDATE servers SET name=?,icon=? WHERE id=?",name,string(body.icon??"",4,0),target));
       else commands.push(sql("INSERT INTO servers(id,name,icon) VALUES(?,?,?)",key,name,string(body.icon??"",4,0)),sql("INSERT INTO members(server,uid) VALUES(?,?)",key,id));
+    } else if (action==="app_logo_remove") {
+      const row=await one<{value:string}>("SELECT value FROM settings WHERE key='app_logo'");
+      commands.push(sql("DELETE FROM settings WHERE key='app_logo'"));
+      if (row?.value) files.push(row.value);
     } else if (action==="server_picture_remove") {
       const row=await one<{picture:string|null}>("SELECT picture FROM servers WHERE id=?",target);
       if (!row) deny(404,"Server unavailable.");

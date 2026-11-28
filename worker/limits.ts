@@ -19,7 +19,7 @@ export function allow(key: string, limit: number, now: number) {
 // Requests a minute per person for each read route.
 export const readLimits: Record<string, number> = {
   session: 60, workspace: 30, history: 60, search: 20, poll: 200, ice: 10, transport: 10,
-  attachment: 600, avatar: 600, admin: 30,
+  attachment: 600, avatar: 600, applogo: 600, admin: 30,
 };
 
 // Bytes one person may upload per UTC day.
