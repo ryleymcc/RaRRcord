@@ -1,6 +1,6 @@
 "use client";
 import { Fragment,memo,useCallback,useEffect,useLayoutEffect,useRef,useState, type ClipboardEvent, type FormEvent, type ReactNode } from "react";
-import { AudioLines, Camera, ChevronDown, CircleHelp, Copy, CornerUpLeft, Ellipsis, Flag, Headphones, Hash, LockKeyhole, LogOut, Menu, MessageSquare, Mic, MicOff, MonitorUp, Paperclip, ArrowDown, Download, FileText, Pencil, Pin, Plus, Reply, Search, Send, Settings, Shield, Smile, SmilePlus, Trash2, Users, Video, X } from "lucide-react";
+import { AudioLines, Expand, HeadphoneOff, LayoutGrid, Maximize2, MonitorOff, PhoneOff, VideoOff, Volume2, ChevronDown, CircleHelp, Copy, CornerUpLeft, Ellipsis, Flag, Headphones, Hash, LockKeyhole, LogOut, Menu, MessageSquare, Mic, MicOff, MonitorUp, Paperclip, ArrowDown, Download, FileText, Pencil, Pin, Plus, Reply, Search, Send, Settings, Shield, Smile, SmilePlus, Trash2, Users, Video, X } from "lucide-react";
 import { ConfirmHost, Modal, confirmAction } from "./dialog";
 import { friendlyError } from "./friendly-error";
 import { useMedia } from "./use-media";
@@ -113,7 +113,18 @@ function Media({feed,deaf,output,volume,video}:{feed:Feed;deaf:boolean;output:st
     if(output && "setSinkId" in el)void (el as HTMLMediaElement & {setSinkId(id:string):Promise<void>}).setSinkId(output).catch(()=>{});
     void el.play().catch(()=>{});
   },[feed.stream,output,volume]);
-  return video?<video autoPlay playsInline controls muted={deaf} ref={node=>{element.current=node;}}/>:<audio autoPlay muted={deaf} ref={node=>{element.current=node;}}/>;
+  return video?<video autoPlay playsInline muted={deaf} ref={node=>{element.current=node;}}/>:<audio autoPlay muted={deaf} ref={node=>{element.current=node;}}/>;
+}
+// One person or screen on the call stage. Video fills the tile; name, actions and fullscreen sit on top.
+function StageTile({name,uid,avatar=false,speaking=false,screen=false,live=false,stream,mirror=false,deaf,output,volume,actions}:{name:string;uid:string;avatar?:boolean;speaking?:boolean;screen?:boolean;live?:boolean;stream?:MediaStream;mirror?:boolean;deaf:boolean;output:string;volume:number;actions?:ReactNode}){
+  const tile=useRef<HTMLDivElement>(null);
+  return <div ref={tile} className={"stage-tile"+(screen?" screen":"")+(stream?" has-video":"")+(speaking?" speaking":"")+(mirror?" mirror":"")}>
+    {stream?<Media feed={{key:uid,peer:uid,kind:screen?"screen":"cam",stream}} deaf={deaf} output={output} volume={volume} video/>:<Avatar name={name} uid={uid} has={avatar}/>}
+    <div className="tile-label">{screen?<MonitorUp size={14}/>:null}<span>{name}</span>{live&&<b className="live-tag">LIVE</b>}</div>
+    <div className="tile-actions">{actions}
+      {stream&&<button type="button" aria-label={"Full screen: "+name} title="Full screen" onClick={()=>{if(document.fullscreenElement)void document.exitFullscreen();else void tile.current?.requestFullscreen().catch(()=>{});}}><Expand size={15}/></button>}
+    </div>
+  </div>;
 }
 function Diagnostics({call,latency,errors}:{call:Call|null;latency:number|null;errors:{time:number;text:string}[]}){
   const [telemetry,setTelemetry]=useState<{call:Call;records:Metrics[];samples:DiagnosticSample[]}>();
@@ -640,7 +651,9 @@ export default function Community(){
   const currentServer=space?.servers.find(s=>s.id===server);
   const callTitle=space?.channels.find(c=>c.id===call?.channel)?.name;
   const feeds=call?.feeds.filter(f=>f.kind!=="voice")??[];
-  const orderedFeeds=speaker?[...feeds].sort((a,b)=>Number(call?.speaking(b.peer))-Number(call?.speaking(a.peer))):feeds;
+  const screens=feeds.filter(f=>f.kind==="screen");
+  // Focus view puts whoever is talking first, so they get the large tile when nobody is sharing.
+  const stagePeople=call?(speaker?[...call.participants].sort((a,b)=>Number(call.speaking(b.peer))-Number(call.speaking(a.peer))):call.participants):[];
   const ownVoice=call?.local.get("cam");
   const bounded=ready===chatId?messages.slice(-350):[];
   const byId=new Map(bounded.map(m=>[m.id,m]));
@@ -688,21 +701,34 @@ export default function Community(){
       </header>
       <div className={"conversation-body"+(sidechatOpen?" with-sidechat":"")}>
       {mainStage&&<div className="stage">
-        {call?<><div className="stage-head"><div><h2>{callTitle}</h2><p>{call.participants.length} connected</p></div><button onClick={()=>setSpeaker(!speaker)}>{speaker?"Grid view":"Active speaker view"}</button></div>
-          <div className={"stage-grid"+(speaker?" speaker":"")}>{call.participants.map(participant=><div key={participant.peer} className={"participant "+(call.speaking(participant.peer)?"speaking":"")}><Avatar name={participant.name} uid={participant.uid}/><b>{participant.name}{participant.peer===call.peer?" (you)":""}</b>
-            {participant.peer!==call.peer&&<div className="inline">{(["cam","screen"] as const).filter(k=>participant[k]).map(k=><button key={k} onClick={()=>call.watch(participant.peer,k,!call.watching(participant.peer,k))}>{(call.watching(participant.peer,k)?"Hide ":"Show ")+(k==="cam"?"camera":"screen")}</button>)}</div>}
-            {participant.peer!==call.peer&&<label className="volume">Volume<input type="range" min={0} max={1} step={0.05} value={volumes[participant.peer]??1} onChange={e=>setVolumes(v=>({...v,[participant.peer]:+e.target.value}))}/></label>}
-          </div>)}
-          {ownVoice&&<div className="video-card"><Media feed={{key:"preview",peer:call.peer,kind:"cam",stream:ownVoice}} deaf output="" video volume={0}/><span>Your camera preview</span></div>}
-          {orderedFeeds.map(f=><div className="video-card" key={f.key}><Media feed={f} deaf={call.deaf} output={prefs.output} video volume={volumes[f.peer]??1}/><span>{call.participants.find(p=>p.peer===f.peer)?.name} · {f.kind==="cam"?"Camera":"Screen"}</span></div>)}</div>
-          <div className="call-controls">
-            <button className={call.microphoneActive?"live-control":""} disabled={call.microphonePending||(call.deaf&&!call.local.has("voice"))} onClick={()=>void call.toggle("voice")}>{call.microphoneActive?<Mic size={18}/>:<MicOff size={18}/>} {call.microphonePending?"Starting microphone…":call.local.has("voice")?"Turn off microphone":"Enable microphone"}</button>
-            <button onClick={()=>call.setDeaf(!call.deaf)}><Headphones size={18}/>{call.deaf?"Undeafen":"Deafen"}</button>
-            <button className={call.local.has("cam")?"live-control":""} onClick={()=>void call.toggle("cam")}><Camera size={18}/>{call.local.has("cam")?"Stop camera":"Camera"}</button>
-            <button className={call.local.has("screen")?"live-control":""} onClick={()=>void call.toggle("screen")}><MonitorUp size={18}/>{call.local.has("screen")?"Stop sharing":"Share screen"}</button>
-            <button onClick={()=>setModal("diagnostics")}><AudioLines size={18}/>Diagnostics</button>
+        {call?<><div className="stage-head"><div><h2>{callTitle}</h2><p>{call.participants.length===1?"Just you so far":call.participants.length+" connected"}</p></div>
+          {(screens.length>0||call.participants.length>2)&&<button type="button" className="view-toggle" aria-pressed={speaker} onClick={()=>setSpeaker(!speaker)}>{speaker?<><LayoutGrid size={16}/>Grid view</>:<><Maximize2 size={16}/>Focus view</>}</button>}</div>
+          <div className={"stage-grid"+(speaker?" speaker":"")} data-count={Math.min(screens.length+call.participants.length,5)}>
+            {screens.map(f=>{const who=call.participants.find(p=>p.peer===f.peer);return <StageTile key={f.key} name={(who?.name??"Someone")+"’s screen"} uid={who?.uid??f.peer} screen
+              stream={f.stream} deaf={call.deaf} output={prefs.output} volume={volumes[f.peer]??1}
+              actions={<button type="button" onClick={()=>call.watch(f.peer,"screen",false)}><MonitorOff size={15}/>Stop watching</button>}/>;})}
+            {stagePeople.map(participant=>{
+              const you=participant.peer===call.peer;
+              const cam=you?ownVoice:feeds.find(f=>f.peer===participant.peer&&f.kind==="cam")?.stream;
+              return <StageTile key={participant.peer} name={participant.name+(you?" (you)":"")} uid={participant.uid} avatar={avatars.get(participant.uid)??false}
+                speaking={call.speaking(participant.peer)} stream={cam} mirror={you} deaf={you||call.deaf} output={prefs.output} volume={volumes[participant.peer]??1}
+                live={!!participant.screen}
+                actions={you?null:<>
+                  {participant.cam?<button type="button" onClick={()=>call.watch(participant.peer,"cam",!call.watching(participant.peer,"cam"))}>{call.watching(participant.peer,"cam")?<><VideoOff size={15}/>Hide camera</>:<><Video size={15}/>Show camera</>}</button>:null}
+                  {participant.screen&&!call.watching(participant.peer,"screen")?<button type="button" onClick={()=>call.watch(participant.peer,"screen",true)}><MonitorUp size={15}/>Show screen</button>:null}
+                  <label className="volume" title="Volume"><Volume2 size={15}/><span className="sr-only">Volume for {participant.name}</span><input type="range" min={0} max={1} step={0.05} value={volumes[participant.peer]??1} onChange={e=>setVolumes(v=>({...v,[participant.peer]:+e.target.value}))}/></label>
+                </>}/>;
+            })}
           </div>
-        </>:<div className="blank"><AudioLines size={32}/><h2>{voiceRoom?.name??"Voice room"}</h2>{voiceRoom&&<button className="primary" onClick={()=>void join(voiceRoom)}>Join voice room</button>}</div>}
+          <div className="call-bar" role="toolbar" aria-label="Call controls">
+            <button type="button" className={"call-button"+(call.microphoneActive?"":" off")} aria-label={call.microphonePending?"Starting microphone":call.microphoneActive?"Mute microphone":call.local.has("voice")?"Unmute microphone":"Turn on microphone"} title={call.microphoneActive?"Mute":"Unmute"} aria-pressed={!call.microphoneActive} disabled={call.microphonePending||(call.deaf&&!call.local.has("voice"))} onClick={()=>void call.toggle("voice")}>{call.microphoneActive?<Mic size={20}/>:<MicOff size={20}/>}</button>
+            <button type="button" className={"call-button"+(call.deaf?" off":"")} aria-label={call.deaf?"Undeafen":"Deafen"} title={call.deaf?"Undeafen":"Deafen"} aria-pressed={call.deaf} onClick={()=>call.setDeaf(!call.deaf)}>{call.deaf?<HeadphoneOff size={20}/>:<Headphones size={20}/>}</button>
+            <button type="button" className={"call-button"+(call.local.has("cam")?" on":"")} aria-label={call.local.has("cam")?"Turn off camera":"Turn on camera"} title={call.local.has("cam")?"Turn off camera":"Turn on camera"} aria-pressed={call.local.has("cam")} onClick={()=>void call.toggle("cam")}>{call.local.has("cam")?<Video size={20}/>:<VideoOff size={20}/>}</button>
+            <button type="button" className={"call-button"+(call.local.has("screen")?" on":"")} aria-label={call.local.has("screen")?"Stop sharing your screen":"Share your screen"} title={call.local.has("screen")?"Stop sharing":"Share screen"} aria-pressed={call.local.has("screen")} onClick={()=>void call.toggle("screen")}>{call.local.has("screen")?<MonitorOff size={20}/>:<MonitorUp size={20}/>}</button>
+            <button type="button" className="call-button" aria-label="Connection diagnostics" title="Diagnostics" onClick={()=>setModal("diagnostics")}><AudioLines size={20}/></button>
+            <button type="button" className="call-button leave" aria-label="Leave call" title="Leave call" onClick={()=>voice.disconnect()}><PhoneOff size={20}/></button>
+          </div>
+        </>:<div className="blank"><span className="empty-icon"><AudioLines size={28}/></span><h2>{voiceRoom?.name??"Voice room"}</h2><p>{voiceRoom&&membersOf(voiceRoom.id).length?new Intl.ListFormat(undefined,{type:"conjunction"}).format(membersOf(voiceRoom.id).map(m=>m.name))+" "+(membersOf(voiceRoom.id).length===1?"is":"are")+" here.":"No one is here yet."}</p>{voiceRoom&&<button className="primary" onClick={()=>void join(voiceRoom)}>Join voice room</button>}</div>}
       </div>}
       {(!mainStage||sidechatOpen)&&<section className={"chat-pane"+(sidechatOpen?" voice-sidechat":"")} id={sidechatOpen?"voice-sidechat":undefined} aria-label={sidechatOpen?"Voice channel sidechat":"Channel chat"}
         onDragEnter={e=>{if(chatChannel&&e.dataTransfer.types.includes("Files")){e.preventDefault();setDragging(true);}}}
