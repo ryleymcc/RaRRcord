@@ -17,6 +17,8 @@ Self-hosting steps:
 3. Serve the Worker on that custom domain only. The build sets `workers_dev: false` and `preview_urls: false`, because those URLs would skip Access.
 4. Sign-out goes to `/cdn-cgi/access/logout`, so the Access session ends too.
 
+5. For calls, create a TURN key in the Cloudflare dashboard (Realtime > TURN) and set `RARRCORD_TURN_KEY_ID` and `RARRCORD_TURN_KEY_TOKEN`. Members can then turn on **Hide my IP address in calls** in User settings, which sends their media only through the relay, so nobody in the call sees their IP address. Without a relay, calls connect directly and everyone in the room can see each other's public IP.
+
 User ids are `cf:<Access user id>`, so accounts created on Sites don't carry over. Members sign up again and the owner approves them.
 
 ## Prerequisites

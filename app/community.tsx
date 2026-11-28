@@ -269,6 +269,7 @@ function UserSettings({person,prefs,limit,save,report,signOut}:{person:Person;pr
     <fieldset hidden={tab!=="app"}><legend>Appearance and notifications</legend><label className="inline"><input type="checkbox" checked={form.compact} onChange={e=>change("compact",e.target.checked)}/>Compact messages</label>
       <label className="inline"><input type="checkbox" checked={form.notifications} onChange={async e=>{const want=e.target.checked;change("notifications",want&&"Notification" in window&&(await Notification.requestPermission())==="granted");}}/>Browser mention notifications</label>
       <label className="inline"><input type="checkbox" checked={form.voiceSounds!==false} onChange={e=>change("voiceSounds",e.target.checked)}/>Voice join and leave sounds</label>
+      <label className="inline"><input type="checkbox" checked={!!form.hideIp} onChange={e=>change("hideIp",e.target.checked)}/>Hide my IP address in calls (routes calls through the relay, which can add a little delay)</label>
     </fieldset>
     <footer className="save-bar"><span>{dirty?"You have unsaved changes.":""}</span><a href="/privacy">Privacy</a><button className="primary" disabled={!dirty}>Save changes</button></footer>
   </form>;
