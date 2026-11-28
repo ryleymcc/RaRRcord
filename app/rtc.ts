@@ -1,4 +1,5 @@
 import { request, type Preferences } from "./ra-client";
+import { microphoneConstraints, processVoice, type VoiceProcessor } from "./noise-suppression";
 import { screenShareSettings, useNativeCapture, videoCodecPreferences } from "./screen-share";
 export type Participant={uid:string;peer:string;name:string;cam:number;screen:number};
 type Medium="voice"|"cam"|"screen";
@@ -31,6 +32,8 @@ export class Call {
   deaf=false;
   context?:AudioContext;
   meter?:number;
+  // Mic → denoiser → voice gate. local.get("voice") holds its output; the device stream is kept here.
+  private voice?:{raw:MediaStream;processor:VoiceProcessor};
   pressed=false;
   private closed=false;
   // Remote speaking is measured from each peer's incoming voice audio, so it needs no signaling.
@@ -296,15 +299,21 @@ export class Call {
       const screen=screenShareSettings(prefs,this.screenBitrateLimit);
       const capture=navigator.mediaDevices;
       if(!capture || (kind==="screen" && !capture.getDisplayMedia))throw new Error("This browser or window does not support the requested capture. Open the Site in a regular browser tab.");
-      const stream=kind==="screen"?await capture.getDisplayMedia({video:screen.capture,audio:true}):
-        await capture.getUserMedia(kind==="cam"?{video:{deviceId:prefs.camera?{exact:prefs.camera}:undefined,height:{ideal:720},frameRate:{ideal:30}}}:
-          {audio:{deviceId:prefs.input?{exact:prefs.input}:undefined,noiseSuppression:prefs.noise,echoCancellation:prefs.echo,autoGainControl:prefs.gain}});
+      let stream=kind==="screen"?await capture.getDisplayMedia({video:screen.capture,audio:true}):
+        await capture.getUserMedia(kind==="cam"?{video:{deviceId:prefs.camera?{exact:prefs.camera}:undefined,height:{ideal:720},frameRate:{ideal:30}}}:microphoneConstraints(prefs));
       const screenTrack=kind==="screen"?stream.getVideoTracks()[0]:undefined;
       if(screenTrack && screen.maximum)await useNativeCapture(screenTrack).catch(()=>{});
       if(this.closed){stream.getTracks().forEach(track=>track.stop());return;}
       if(kind==="voice" && !stream.getAudioTracks().some(track=>track.readyState==="live")){
         stream.getTracks().forEach(track=>track.stop());
         throw new Error("No working microphone was found. Check your input device in User settings.");
+      }
+      if(kind==="voice"){
+        const raw=stream, processor=await processVoice(raw,prefs);
+        if(this.closed){processor.close();raw.getTracks().forEach(track=>track.stop());return;}
+        this.voice={raw,processor};
+        stream=processor.stream;
+        if(processor.fallback)this.error(processor.fallback);
       }
       this.local.set(kind,stream);
       for(const track of stream.getTracks()) {
@@ -318,6 +327,7 @@ export class Call {
     }catch(error){
       if(this.closed)return;
       if(kind==="voice" && this.local.has(kind))await this.stop(kind);
+      else if(kind==="voice")this.releaseVoice();
       const name=error instanceof DOMException?error.name:"";
       if(name==="NotAllowedError")this.error("Capture permission was declined or blocked. Check your browser’s site permissions.");
       else if(kind==="voice" && (name==="NotFoundError" || name==="OverconstrainedError"))this.error("The selected microphone is unavailable. Check your input device in User settings.");
@@ -328,19 +338,29 @@ export class Call {
     const stream=this.local.get(kind);
     this.local.delete(kind);
     stream?.getTracks().forEach(track=>track.stop());
-    if(kind==="voice")this.stopMeter();
+    if(kind==="voice"){this.stopMeter();this.releaseVoice();}
     for(const link of this.links.values())this.publish(link,kind);
     if(kind!=="voice")await this.announce();
     this.changed();
   }
   private announce(){return request("voice",{action:"media",channel:this.channel,peer:this.peer,cam:this.local.has("cam"),screen:this.local.has("screen")}).catch(e=>this.error(e.message));}
+  private releaseVoice(){
+    if(!this.voice)return;
+    this.voice.processor.close();
+    this.voice.raw.getTracks().forEach(track=>track.stop());
+    this.voice=undefined;
+  }
   private meterVoice(stream:MediaStream){
     try{
-      this.context=new AudioContext();
-      void this.context.resume();
-      const analyser=this.context.createAnalyser();
+      // Measure what is actually sent, so typing that the gate removes does not light up the speaking ring.
+      const processor=this.voice?.processor;
+      const shared=processor?.context && processor.output;
+      const context=shared?processor.context!:(this.context=new AudioContext());
+      void context.resume();
+      const analyser=context.createAnalyser();
       analyser.fftSize=512;
-      this.context.createMediaStreamSource(stream).connect(analyser);
+      if(shared)processor.output!.connect(analyser);
+      else context.createMediaStreamSource(stream).connect(analyser);
       const samples=new Uint8Array(analyser.fftSize);
       let silent=0;
       this.meter=window.setInterval(()=>{
@@ -406,6 +426,7 @@ export class Call {
     window.removeEventListener("keyup",this.keyup);
     window.removeEventListener("blur",this.release);
     this.stopMeter();
+    this.releaseVoice();
     window.clearInterval(this.earTimer);
     for(const ear of this.hearing.values())ear.source.disconnect();
     this.hearing.clear();
