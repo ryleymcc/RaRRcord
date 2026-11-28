@@ -6,13 +6,13 @@ import {backgroundPresets} from "../lib/backgrounds.ts";
 import {confirmAction} from "./dialog";
 type Workspace={servers:Server[];channels:Channel[];settings:{key:string;value:string}[];logo?:string|null};
 type State={users:(Person&{seen:number})[];channels:Channel[];logs:{id:number;name:string;action:string;detail:string;time:number}[];streams:{uid:string;name:string;room:string;cam:number;screen:number}[];roles:{server:string;name:string}[];members:{server:string;uid:string;role:string}[]};
-export default function Admin({space,server,report,refresh}:{space:Workspace;server:string;report:(text:string)=>void;refresh:()=>Promise<void>}){
-  const [tab,setTab]=useState("Members");
+export default function Admin({space,server,initialTab,initialChannelId,report,refresh}:{space:Workspace;server:string;initialTab:"Members"|"Servers";initialChannelId?:string;report:(text:string)=>void;refresh:()=>Promise<void>}){
+  const [tab,setTab]=useState<string>(initialTab);
   const [data,setData]=useState<State|null>(null);
   const [invite,setInvite]=useState("");
-  const [targetServer,setTargetServer]=useState(server);
-  const [channel,setChannel]=useState<Channel|null>(null);
-  const [channelKind,setChannelKind]=useState("text");
+  const [serverChoice,setServerChoice]=useState(server);
+  const [channelId,setChannelId]=useState(initialChannelId);
+  const [kindOverride,setKindOverride]=useState<string>();
   const [serverEdit,setServerEdit]=useState(false);
   const [dropTarget,setDropTarget]=useState("");
   const [uploading,setUploading]=useState(false);
@@ -20,11 +20,12 @@ export default function Admin({space,server,report,refresh}:{space:Workspace;ser
   const sure=async(title:string,body:string,action:string,run:()=>void)=>{if((await confirmAction({title,body,action,danger:true})).ok)run();};
   const update=()=>request<State>("admin").then(setData).catch(e=>report(e.message));
   useEffect(()=>{void update();},[]);
-  async function act(input:object){
+  async function act(input:object,onSaved?:(id:string)=>void){
     try{
-      const result=await request<{invitation?:string}>("admin",input);
+      const result=await request<{invitation?:string;id:string}>("admin",input);
       if(result.invitation)setInvite(result.invitation);else report("Changes saved.");
       await Promise.all([update(),refresh()]);
+      onSaved?.(result.id);
     }catch(e){report((e as Error).message);}
   }
   async function uploadPicture(file:File){
@@ -34,12 +35,17 @@ export default function Admin({space,server,report,refresh}:{space:Workspace;ser
     catch(e){report((e as Error).message);}
     finally{setUploading(false);}
   }
-  const active=space.servers.find(s=>s.id===targetServer);
+  const active=space.servers.find(s=>s.id===serverChoice)??space.servers.find(s=>s.id===server)??space.servers[0];
+  const targetServer=active?.id??"";
   const channels=(data?.channels??space.channels).filter(c=>c.server===targetServer);
+  const channel=channels.find(c=>c.id===channelId);
+  const channelKind=kindOverride??channel?.kind??"text";
   const roles=["member","moderator",...(data?.roles.filter(r=>r.server===targetServer).map(r=>r.name)??[])];
   const settings=Object.fromEntries(space.settings.map(r=>[r.key,r.value]));
   function form(e:FormEvent<HTMLFormElement>){e.preventDefault();return Object.fromEntries(new FormData(e.currentTarget));}
-  const menu=<label>Server<select value={targetServer} onChange={e=>{setTargetServer(e.target.value);setChannel(null);setChannelKind("text");}}>{space.servers.map(s=><option key={s.id} value={s.id}>{s.name}</option>)}</select></label>;
+  function selectChannel(id?:string){setChannelId(id);setKindOverride(undefined);}
+  function selectServer(id:string){setServerChoice(id);selectChannel();}
+  const menu=<label>Server<select value={targetServer} onChange={e=>selectServer(e.target.value)}>{space.servers.map(s=><option key={s.id} value={s.id}>{s.name}</option>)}</select></label>;
   return <div className="admin">
     <nav className="tabs" aria-label="Administration sections">{["Members","Servers","Activity","Settings"].map(t=><button className={t===tab?"active":""} key={t} onClick={()=>setTab(t)}>{t}{t==="Members"&&!!data?.users.some(u=>u.state==="pending")&&<span className="badge">{data.users.filter(u=>u.state==="pending").length}</span>}</button>)}</nav>
     {!data&&<p>Loading administration…</p>}
@@ -62,7 +68,9 @@ export default function Admin({space,server,report,refresh}:{space:Workspace;ser
     </div>}
     {tab==="Servers"&&<div className="settings-form">
       {menu}
-      <form className="inline" key={String(serverEdit)+targetServer} onSubmit={e=>void act({action:"server",target:serverEdit?targetServer:"",...form(e)})}>
+      <form className="inline" key={String(serverEdit)+targetServer} onSubmit={e=>void act(
+        {action:"server",target:serverEdit?targetServer:"",...form(e)},serverEdit?undefined:selectServer
+      )}>
         <label>Server name<input name="name" required maxLength={60} defaultValue={serverEdit?active?.name:""}/></label><label>Server icon<input name="icon" maxLength={4} defaultValue={serverEdit?active?.icon:""}/></label>
         <button className="primary">{serverEdit?"Rename server":"Create server"}</button>
         <button type="button" onClick={()=>setServerEdit(!serverEdit)}>{serverEdit?"Create new":"Edit selected"}</button>
@@ -76,22 +84,23 @@ export default function Admin({space,server,report,refresh}:{space:Workspace;ser
         <small>PNG, JPEG, GIF or WebP, up to 2 MB. Square images look best.</small>
       </div>}
       {serverEdit&&active&&<ServerBackground key={active.id+"|"+(active.background??"")+"|"+(active.background_fill??"")+"|"+(active.background_dim??60)} server={active} act={act} report={report} refresh={async()=>{await Promise.all([update(),refresh()]);}}/>}
-      <h3>Channels</h3><p>Drag a channel onto another row to move it to that position.</p>
+      <h3>Channels</h3>
+      {active&&(!channels.length?<p>No channels in {active.name} yet.</p>:channels.length>1&&<p>Drag a channel onto another row to move it to that position.</p>)}
       <div>{channels.map((c,i)=><div className={"admin-row"+(dropTarget===c.id?" drop-target":"")} draggable key={c.id} onDragStart={e=>e.dataTransfer.setData("text/plain",c.id)} onDragOver={e=>{e.preventDefault();setDropTarget(c.id);}} onDragLeave={()=>setDropTarget(t=>t===c.id?"":t)} onDragEnd={()=>setDropTarget("")} onDrop={e=>{
         e.preventDefault();setDropTarget("");
         const source=channels.find(x=>x.id===e.dataTransfer.getData("text/plain"));
         if(source&&source.id!==c.id)void act({action:"order",target:source.id,destination:c.id,server:targetServer});
       }}><span>{c.name}<small>{c.kind} · {c.category||"Channels"}</small></span>
         <span className="order"><button type="button" aria-label={"Move "+c.name+" up"} title="Move up" disabled={i===0} onClick={()=>void act({action:"order",target:c.id,destination:channels[i-1].id,server:targetServer})}><ArrowUp size={15}/></button><button type="button" aria-label={"Move "+c.name+" down"} title="Move down" disabled={i===channels.length-1} onClick={()=>void act({action:"order",target:c.id,destination:channels[i+1].id,server:targetServer})}><ArrowDown size={15}/></button></span>
-        <button onClick={()=>{setChannel(c);setChannelKind(c.kind);}}>Edit</button><button className="danger" onClick={()=>void sure("Delete #"+c.name,"This deletes the channel and its message history. It can't be undone.","Delete channel",()=>void act({action:"channel_delete",target:c.id}))}>Delete</button></div>)}</div>
-      {channel&&<button onClick={()=>{setChannel(null);setChannelKind("text");}}>New channel</button>}
-      <form className="settings-form" key={channel?.id??"new"} onSubmit={e=>{
+        <button onClick={()=>selectChannel(c.id)}>Edit</button><button className="danger" onClick={()=>void sure("Delete #"+c.name,"This deletes the channel and its message history. It can't be undone.","Delete channel",()=>void act({action:"channel_delete",target:c.id}))}>Delete</button></div>)}</div>
+      {channel&&<button onClick={()=>selectChannel()}>New channel</button>}
+      {active&&data&&<form className="settings-form" key={targetServer+"/"+(channel?.id??"new")} onSubmit={e=>{
         const fd=new FormData(e.currentTarget);e.preventDefault();
         void act({action:"channel",target:channel?.id,server:targetServer,...Object.fromEntries(fd),users:fd.getAll("users")});
       }}>
         <fieldset><legend>{channel?"Edit channel":"Create channel"}</legend>
-          <label>Name<input name="name" defaultValue={channel?.name} required maxLength={60}/></label>
-          <label>Type<select name="kind" value={channelKind} onChange={e=>setChannelKind(e.target.value)}><option value="text">Text</option><option value="voice">Voice</option><option value="private">Private text</option></select></label>
+          <label>Name<input name="name" defaultValue={channel?.name} required maxLength={60} autoFocus={!!channel}/></label>
+          <label>Type<select name="kind" value={channelKind} onChange={e=>setKindOverride(e.target.value)}><option value="text">Text</option><option value="voice">Voice</option><option value="private">Private text</option></select></label>
           <label>Category<input name="category" maxLength={40} defaultValue={channel?.category??"Text channels"}/></label>
           <label>Description<input name="description" maxLength={200} defaultValue={channel?.description}/></label>
           <label>Position<input name="position" type="number" min={0} defaultValue={channel?.position??channels.length}/></label>
@@ -99,7 +108,7 @@ export default function Admin({space,server,report,refresh}:{space:Workspace;ser
             <label>Required role<select name="permission" defaultValue={channel?.permission}><option value="">Any server member</option>{roles.map(r=><option key={r}>{r}</option>)}</select></label>}
           <button className="primary">{channel?"Save channel":"Create channel"}</button>
         </fieldset>
-      </form>
+      </form>}
       <form className="inline" onSubmit={e=>void act({action:"role",server:targetServer,...form(e)})}><label>New role<input name="role" maxLength={32} required/></label><button>Create role</button></form>
       <form className="inline" onSubmit={e=>void act({action:"member",server:targetServer,...form(e)})}>
         <label>Account<select name="target" required>{data?.users.filter(u=>u.state==="approved").map(u=><option key={u.id} value={u.id}>{u.name}</option>)}</select></label>

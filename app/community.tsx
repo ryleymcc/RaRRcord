@@ -438,6 +438,7 @@ export default function Community({localAuth=false}:{localAuth?:boolean}={}){
   const [find,setFind]=useState("");
   const [pinned,setPinned]=useState(false);
   const [modal,setModal]=useState("");
+  const [adminView,setAdminView]=useState<{tab:"Members"|"Servers";channelId?:string}>({tab:"Members"});
   const modalRef=useRef(modal);
   useEffect(()=>{modalRef.current=modal;},[modal]);
   const [toast,setToast]=useState("");
@@ -535,9 +536,12 @@ export default function Community({localAuth=false}:{localAuth?:boolean}={}){
   },[auth?.active,refresh,report,refreshAuth,voice]);
   useEffect(()=>{
     if(!space)return;
-    if(space.channels.some(c=>c.id===selected))return;
-    const first=space.channels.find(c=>c.server===server&&c.kind==="text")??space.channels.find(c=>c.kind==="text");
-    if(first){setServer(first.server??server);setSelected(first.id);}
+    const availableServer=space.servers.find(s=>s.id===server)?.id??space.servers[0]?.id;
+    if(availableServer&&availableServer!==server)setServer(availableServer);
+    if(space.channels.some(c=>c.id===selected&&(c.server===availableServer||c.kind==="dm")))return;
+    const first=space.channels.find(c=>c.server===availableServer&&c.kind==="text");
+    setSelected(first?.id??"");
+    if(selected)setStage(false);
   },[space,selected,server]);
   const openedInitialLink=useRef(false);
   useEffect(()=>{
@@ -752,6 +756,14 @@ export default function Community({localAuth=false}:{localAuth?:boolean}={}){
     document.addEventListener("keydown",key);
     return ()=>document.removeEventListener("keydown",key);
   },[]);
+  function openAdmin(tab:"Members"|"Servers"="Members",channelId?:string){
+    setAdminView({tab,channelId});
+    setModal("admin");
+  }
+  function openServer(id:string){
+    setServer(id);setStage(false);setServerMenu(false);setFind("");setPinned(false);
+    setSelected(space?.channels.find(c=>c.server===id&&c.kind==="text")?.id??"");
+  }
   function choose(c:Channel){
     setMobile(false);setFind("");setPinned(false);setSelected(c.id);
     if(c.kind==="voice"){setStage(true);void join(c);}
@@ -981,6 +993,7 @@ export default function Community({localAuth=false}:{localAuth?:boolean}={}){
   const roomSince=(id:string)=>{const times=rooms.filter(r=>r.channel===id&&(r.joined??0)>0).map(r=>r.joined!);return times.length?Math.min(...times):undefined;};
   const currentServer=space?.servers.find(s=>s.id===server);
   const admin=person?.role==="admin";
+  const emptyServer=!!currentServer&&!channels.some(c=>c.server===server);
   const callServer=space?.servers.find(s=>s.id===space.channels.find(c=>c.id===call?.channel)?.server)?.name;
   // Direct messages belong to no server, so they keep the plain chat colour.
   const backdrop=channel?.kind==="dm"?undefined:serverBackground(currentServer);
@@ -1003,16 +1016,14 @@ export default function Community({localAuth=false}:{localAuth?:boolean}={}){
   const sheetOpen=mobile||(!wide&&membersSheet);
   return <div className={"assembly "+(members?"with-members ":"")+(mobile?"mobile-nav ":"")+(prefs.compact?"compact":"")}>
     <nav className="rail" aria-label="Servers">
-      <div className="rail-item"><button className="mark" aria-label="RaRRcord home" title="Home" onClick={()=>{const home=space?.servers[0]?.id??"community";setServer(home);setSelected(space?.channels.find(c=>c.server===home&&c.kind==="text")?.id??"");setStage(false);}}>{space?.logo?<img src={appLogoUrl(space.logo)} alt=""/>:"R"}</button></div>
+      <div className="rail-item"><button className="mark" aria-label="RaRRcord home" title="Home" onClick={()=>openServer(space?.servers[0]?.id??"community")}>{space?.logo?<img src={appLogoUrl(space.logo)} alt=""/>:"R"}</button></div>
       <hr/>
       {space?.servers.map(s=>{
         // A white pill marks the open server; a short one marks servers with unread messages.
         const unread=s.id!==server&&space.channels.some(c=>c.server===s.id&&c.unread>0);
-        return <div key={s.id} className={"rail-item"+(s.id===server?" selected":"")+(unread?" unread":"")}><button className={"server-pill"+(s.id===server?" selected":"")} title={s.name} aria-label={s.name+(unread?", unread messages":"")} aria-current={s.id===server||undefined} onClick={()=>{
-          setServer(s.id);setSelected(space.channels.find(c=>c.server===s.id&&c.kind==="text")?.id??"");setStage(false);setServerMenu(false);
-        }}>{s.picture?<img src={serverPictureUrl(s.id,s.picture)} alt=""/>:s.icon||initials(s.name)}</button></div>;
+        return <div key={s.id} className={"rail-item"+(s.id===server?" selected":"")+(unread?" unread":"")}><button className={"server-pill"+(s.id===server?" selected":"")} title={s.name} aria-label={s.name+(unread?", unread messages":"")} aria-current={s.id===server||undefined} onClick={()=>openServer(s.id)}>{s.picture?<img src={serverPictureUrl(s.id,s.picture)} alt=""/>:s.icon||initials(s.name)}</button></div>;
       })}
-      {admin&&<div className="rail-item"><button className="server-pill add" aria-label="Manage servers" title="Manage servers" onClick={()=>setModal("admin")}><Plus size={22}/></button></div>}
+      {admin&&<div className="rail-item"><button className="server-pill add" aria-label="Manage servers" title="Manage servers" onClick={()=>openAdmin("Servers")}><Plus size={22}/></button></div>}
       <div className="rail-bottom"><IconButton label="Diagnostics" onClick={()=>setModal("diagnostics")}><AudioLines size={19}/></IconButton><IconButton label="Help" onClick={()=>setModal("help")}><CircleHelp size={19}/></IconButton></div>
     </nav>
     <aside className="sidebar">
@@ -1020,8 +1031,8 @@ export default function Community({localAuth=false}:{localAuth?:boolean}={}){
         <button type="button" className="server-menu-button" aria-haspopup="menu" aria-expanded={serverMenu} onClick={()=>setServerMenu(!serverMenu)}><h2>{currentServer?.name??"Community"}</h2>{serverMenu?<X size={18}/>:<ChevronDown size={18}/>}</button>
         {serverMenu&&<><div className="menu-catcher" aria-hidden="true" onClick={()=>setServerMenu(false)}/>
           <div className="server-menu" role="menu" aria-label={(currentServer?.name??"Server")+" menu"} onKeyDown={e=>{if(e.key==="Escape")setServerMenu(false);}} onClick={()=>setServerMenu(false)}>
-            {admin&&<button role="menuitem" autoFocus className="accent" onClick={()=>setModal("admin")}>Invite people<UserPlus size={17}/></button>}
-            {admin&&<button role="menuitem" onClick={()=>setModal("admin")}>Server settings<Settings size={17}/></button>}
+            {admin&&<button role="menuitem" autoFocus className="accent" onClick={()=>openAdmin()}>Invite people<UserPlus size={17}/></button>}
+            {admin&&<button role="menuitem" onClick={()=>openAdmin("Servers")}>Server settings<Settings size={17}/></button>}
             <button role="menuitem" autoFocus={!admin} onClick={()=>{setDmUsers([]);setModal("dm");}}>New direct message<MessageSquare size={17}/></button>
             <hr/>
             <button role="menuitem" onClick={()=>setModal("settings")}>User settings<Settings size={17}/></button>
@@ -1030,12 +1041,12 @@ export default function Community({localAuth=false}:{localAuth?:boolean}={}){
       </header>
       <div className="channel-list">
         {!space&&<div className="skeleton-list" aria-label="Loading channels">{[60,75,50,0,55,70].map((w,i)=>w?<span key={i} className="skeleton" style={{width:w+"%"}}/>:<br key={i}/>)}</div>}
-        {groups.map(group=><details key={group} open><summary><span>{group}</span><ChevronDown size={12}/>{admin&&<button type="button" className="category-add" aria-label={"Manage channels in "+group} title="Manage channels" onClick={e=>{e.preventDefault();e.stopPropagation();setModal("admin");}}><Plus size={16}/></button>}</summary>{channels.filter(c=>(c.category||"Channels")===group).map(c=>{
+        {groups.map(group=><details key={group} open><summary><span>{group}</span><ChevronDown size={12}/>{admin&&channels.some(c=>c.server===server&&(c.category||"Channels")===group)&&<button type="button" className="category-add" aria-label={"Manage channels in "+group} title="Manage channels" onClick={e=>{e.preventDefault();e.stopPropagation();openAdmin("Servers");}}><Plus size={16}/></button>}</summary>{channels.filter(c=>(c.category||"Channels")===group).map(c=>{
           const unread=c.unread>0&&chatId!==c.id;
           const since=c.kind==="voice"?roomSince(c.id):undefined;
           return <Fragment key={c.id}><div className="channel-row"><button className={"channel "+(selected===c.id?"selected":"")+(unread&&c.kind!=="dm"?" unread":"")+(call?.channel===c.id?" connected":"")+(dropRoom===c.id?" drop-target":"")} onClick={()=>choose(c)} {...(c.kind==="voice"?dropProps(c):undefined)}>
             {c.kind==="voice"?<Volume2 size={19}/>:c.kind==="private"?<LockKeyhole size={17}/>:<Hash size={19}/>}<span>{c.name}</span>{unread&&c.kind==="dm"&&<b className="badge">{c.unread>99?"99+":c.unread}</b>}{since&&<CallTimer since={since}/>}
-          </button>{admin&&c.server&&<button type="button" className="channel-gear" aria-label={"Edit channel "+c.name} title="Edit channel" onClick={()=>setModal("admin")}><Settings size={15}/></button>}</div>
+          </button>{admin&&c.server&&<button type="button" className="channel-gear" aria-label={"Edit channel "+c.name} title="Edit channel" onClick={()=>openAdmin("Servers",c.id)}><Settings size={15}/></button>}</div>
           {c.kind==="voice"&&<VoiceMembers members={membersOf(c.id)} movable={canMove(c)} dropProps={dropProps(c)} manage={canMove(c)?manage:undefined}/>}</Fragment>;
         })}</details>)}
         <button className="channel dm-button" onClick={()=>{setDmUsers([]);setModal("dm");}}><Plus size={16}/><span>New direct message</span></button>
@@ -1063,14 +1074,14 @@ export default function Community({localAuth=false}:{localAuth?:boolean}={}){
     <main className={"conversation"+(backdrop?" has-backdrop":"")+(mainStage?" voice-view":"")} style={backdrop?{background:backdrop}:undefined}>
       <header className="topbar">
         <span className="mobile-toggle"><IconButton label="Toggle navigation" active={mobile} onClick={()=>{setMembersSheet(false);setMobile(!mobile);}}><Menu size={20}/></IconButton></span>
-        <div className="location-title">{mainStage?<Volume2 size={22}/>:channel?.kind==="private"?<LockKeyhole size={20}/>:<Hash size={22}/>}<h1>{mainStage?callTitle??channel?.name??"Voice room":channel?.name??"Community"}</h1></div>
+        <div className="location-title">{mainStage?<Volume2 size={22}/>:channel?.kind==="private"?<LockKeyhole size={20}/>:<Hash size={22}/>}<h1>{mainStage?callTitle??channel?.name??"Voice room":channel?.name??currentServer?.name??"Community"}</h1></div>
         <span className="channel-description">{channel?.description}</span>
         <div className="top-actions">
           {call&&!mainStage&&<button className="subtle" onClick={()=>{setFind("");setPinned(false);setStage(true);}}>View call</button>}
           {mainStage&&voiceRoom&&<button type="button" className={"sidechat-toggle"+(sidechatOpen?" active":"")} aria-expanded={sidechatOpen} aria-controls={sidechatOpen?"voice-sidechat":undefined} aria-label={sidechatOpen?"Close sidechat":"Open sidechat"} title="Sidechat" onClick={()=>setSidechat(sidechatOpen?"":voiceRoom.id)}><MessageSquare size={20}/>{!sidechatOpen&&voiceRoom.unread>0&&<b className="badge">{Math.min(voiceRoom.unread,99)}{voiceRoom.unread>99?"+":""}</b>}</button>}
-          {!mainStage&&<><label className="search"><Search size={16}/><input aria-label="Search messages" value={find} placeholder="Search messages" onChange={e=>setFind(e.target.value)}/></label><IconButton label="Pinned messages" active={pinned} onClick={()=>setPinned(!pinned)}><Pin size={19}/></IconButton></>}
+          {!mainStage&&chatChannel&&<><label className="search"><Search size={16}/><input aria-label="Search messages" value={find} placeholder="Search messages" onChange={e=>setFind(e.target.value)}/></label><IconButton label="Pinned messages" active={pinned} onClick={()=>setPinned(!pinned)}><Pin size={19}/></IconButton></>}
           <IconButton label="Toggle member list" active={members} onClick={()=>{if(wide)setMembersPref(!membersPref);else{setMobile(false);setMembersSheet(!membersSheet);}}}><Users size={20}/></IconButton>
-          {person?.role==="admin"&&<IconButton label="Administration" onClick={()=>setModal("admin")}><Shield size={19}/></IconButton>}
+          {admin&&<IconButton label="Administration" onClick={()=>openAdmin()}><Shield size={19}/></IconButton>}
         </div>
       </header>
       <div className={"conversation-body"+(sidechatOpen?" with-sidechat":"")}>
@@ -1131,7 +1142,7 @@ export default function Community({localAuth=false}:{localAuth?:boolean}={}){
         }}><div className="feed-inner" ref={feedInner}>
           {!viewingHistory&&hasMore&&bounded.length>=50&&<button className="older" onClick={earlier}>Load earlier messages</button>}
           {!bounded.length&&chatId&&ready!==chatId&&<div className="skeleton-feed" aria-label="Loading messages">{[72,48,90,60,36].map((w,i)=><div key={i} className="skeleton-message"><span className="skeleton avatar-skel"/><div><span className="skeleton" style={{width:"18%"}}/><span className="skeleton" style={{width:w+"%"}}/></div></div>)}</div>}
-          {!bounded.length&&!(chatId&&ready!==chatId)&&<div className="blank"><span className="empty-icon">{sidechatOpen?<MessageSquare size={26}/>:<Hash size={26}/>}</span><h2>{find?"No matching messages":pinned?"No pinned messages":chatChannel?.name??"Welcome to RaRRcord"}</h2>{(!chatId||ready===chatId)&&<p>{find?"Try another search.":pinned?"Pinned messages will appear here.":chatChannel?"Start the conversation.":"Choose a channel to get started."}</p>}</div>}
+          {!bounded.length&&!(chatId&&ready!==chatId)&&<div className="blank"><span className="empty-icon">{sidechatOpen?<MessageSquare size={26}/>:<Hash size={26}/>}</span><h2>{!chatChannel?(emptyServer?"No channels yet":"Welcome to RaRRcord"):find?"No matching messages":pinned?"No pinned messages":chatChannel.name}</h2>{(!chatId||ready===chatId)&&<p>{!chatChannel?(emptyServer?"This server has no channels you can open.":"Choose a channel to get started."):find?"Try another search.":pinned?"Pinned messages will appear here.":"Start the conversation."}</p>}{!chatChannel&&emptyServer&&admin&&<button className="primary" onClick={()=>openAdmin("Servers")}>Manage channels</button>}</div>}
           {bounded.map((m,i)=><MessageRow key={m.id} m={m} channel={chatId} previous={bounded[i-1]} replyTo={m.reply?byId.get(m.reply):undefined}
             me={personId} username={person?.username} admin={person?.role==="admin"} menuOpen={menu===m.id} unreadStart={!viewingHistory&&unreadFrom?.channel===chatId&&unreadFrom.id===m.id} actions={rowActions}/>)}
           {!viewingHistory&&ready===chatId&&!find&&!pinned&&outbox.filter(p=>p.channel===chatId).map((p,i,list)=><div key={p.id} className="pending-message" inert aria-label="Sending">
@@ -1213,7 +1224,7 @@ export default function Community({localAuth=false}:{localAuth?:boolean}={}){
           canMove={!!space.moderates?.includes(server)} move={async r=>{await moveMember(target.id,r);setModal("");}}
           done={message=>{roomsAt.current=0;void refresh();setModal("");setToast(message);}} report={report}/>;
       })()}
-      {modal==="admin"&&space&&<Admin space={space} server={server} report={report} refresh={refresh}/>}
+      {modal==="admin"&&space&&<Admin space={space} server={server} initialTab={adminView.tab} initialChannelId={adminView.channelId} report={report} refresh={refresh}/>}
       {modal==="dm"&&<form className="settings-form" onSubmit={async e=>{e.preventDefault();try{const result=await request<{id:string}>("dm",{users:dmUsers});await refresh();setSelected(result.id);setStage(false);setModal("");}catch(e){report((e as Error).message);}}}>
         {space?.people.filter(p=>p.id!==person?.id).map(p=><label className="inline" key={p.id}><input type="checkbox" checked={dmUsers.includes(p.id)} onChange={e=>setDmUsers(prev=>e.target.checked?[...prev,p.id]:prev.filter(id=>id!==p.id))}/>{p.name}</label>)}
         <button className="primary" disabled={!dmUsers.length}>Open conversation</button>
