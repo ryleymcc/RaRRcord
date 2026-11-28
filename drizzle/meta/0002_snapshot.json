@@ -1,7 +1,7 @@
 {
   "version": "6",
   "dialect": "sqlite",
-  "id": "d6bc750b-462b-40f7-91cf-46b38df18759",
+  "id": "8f7926ef-dd95-41e2-849e-2bee9c9e4c90",
   "prevId": "4ddaee1e-0b93-48d9-8381-a8df560f633d",
   "tables": {
     "audit": {
@@ -601,13 +601,6 @@
           "primaryKey": false,
           "notNull": false,
           "autoincrement": false
-        },
-        "picture": {
-          "name": "picture",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": false,
-          "autoincrement": false
         }
       },
       "indexes": {},
@@ -929,6 +922,14 @@
         },
         "screen": {
           "name": "screen",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "autoincrement": false,
+          "default": 0
+        },
+        "joined": {
+          "name": "joined",
           "type": "integer",
           "primaryKey": false,
           "notNull": true,

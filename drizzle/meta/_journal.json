@@ -19,8 +19,15 @@
     {
       "idx": 2,
       "version": "6",
-      "when": 1795815799222,
-      "tag": "0002_server_picture",
+      "when": 1795832086356,
+      "tag": "0002_voice_joined",
+      "breakpoints": true
+    },
+    {
+      "idx": 3,
+      "version": "6",
+      "when": 1795833725065,
+      "tag": "0003_server_picture",
       "breakpoints": true
     }
   ]
