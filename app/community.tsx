@@ -1,6 +1,6 @@
 "use client";
-import { Fragment,memo,useCallback,useEffect,useLayoutEffect,useRef,useState, type ClipboardEvent, type FormEvent, type HTMLAttributes, type ReactNode } from "react";
-import { AudioLines, Expand, HeadphoneOff, LayoutGrid, Maximize2, MonitorOff, PhoneOff, VideoOff, Volume2, VolumeX, Eye, EyeOff, ChevronDown, CircleHelp, Copy, CornerUpLeft, Ellipsis, Flag, Headphones, Hash, LockKeyhole, LogOut, Menu, MessageSquare, Mic, MicOff, MonitorUp, Paperclip, ArrowDown, Download, FileText, Pencil, Pin, Plus, Reply, Search, Send, Settings, Signal as SignalBars, UserPlus, Shield, Smile, SmilePlus, Trash2, Users, Video, X } from "lucide-react";
+import { Fragment,memo,useCallback,useEffect,useLayoutEffect,useMemo,useRef,useState, type ClipboardEvent, type FormEvent, type HTMLAttributes, type ReactNode } from "react";
+import { AudioLines, Expand, HeadphoneOff, LayoutGrid, Maximize2, MonitorOff, PhoneOff, VideoOff, Volume2, VolumeX, Eye, EyeOff, ChevronDown, ChevronRight, CircleHelp, Copy, CornerUpLeft, Ellipsis, Flag, Headphones, Hash, Link2, LockKeyhole, LogOut, Menu, MessageCircle, MessageSquare, Mic, MicOff, MonitorUp, Paperclip, ArrowDown, Download, FileText, Pencil, Pin, Plus, Reply, Search, Send, Settings, Signal as SignalBars, UserPlus, Shield, Smile, SmilePlus, Trash2, Users, Video, X } from "lucide-react";
 import { ConfirmHost, Modal, confirmAction } from "./dialog";
 import { friendlyError } from "./friendly-error";
 import { useMedia } from "./use-media";
@@ -14,6 +14,7 @@ import { microphoneConstraints, preloadVoice, processVoice, suppressionMode, sup
 import { VoiceSession, codecs, iceServers, type Call, type Feed, type Metrics, type Participant, type Signal } from "./rtc";
 import { request, defaults, qualities, appLogoUrl, serverPictureUrl, serverBackground, type Channel, type Message, type Person, type Preferences, type ReplyPreview, type Server } from "./ra-client";
 import { inlineMarkdown, mentionAtCursor, mentionsUser, splitMentions } from "../lib/chat-mentions";
+import { messageLink, messageLinkPath, parseMessageLink, parseMessageQuery, splitMessageLinks, type MessageLinkTarget } from "../lib/message-links";
 import Admin from "./ra-admin";
 import { DiagnosticCharts, WebRtcInternals } from "./diagnostic-charts";
 import { diagnosticSample, type DiagnosticSample } from "./diagnostic-data";
@@ -57,9 +58,25 @@ function CallTimer({since}:{since:number}){
   const two=(n:number)=>String(n).padStart(2,"0");
   return <time className="call-timer" aria-label="Call length">{h?h+":"+two(m):m}:{two(sec)}</time>;
 }
-type RowActions={action:(kind:string,m:Message,extra?:object)=>Promise<void>;reply:(m:Message)=>void;pick:(m:Message)=>void;edit:(m:Message)=>void;menu:(id:number|null)=>void;jump:(id:number,loadContext?:boolean)=>void;remove:(m:Message)=>void;report:(m:Message)=>void};
+type RowActions={action:(kind:string,m:Message,extra?:object)=>Promise<void>;reply:(m:Message)=>void;pick:(m:Message)=>void;edit:(m:Message)=>void;menu:(id:number|null)=>void;jump:(id:number,loadContext?:boolean)=>void;copyLink:(channel:string,id:number)=>void;remove:(m:Message)=>void;report:(m:Message)=>void};
+type LinkContext={origin:string;channels:ReadonlyMap<string,Channel>};
 const snippet=(text:string)=>text.replace(/\x60\x60\x60[\s\S]*?(\x60\x60\x60|$)/g,"[code]").replace(/\s+/g," ").trim().slice(0,120);
-const messageLink=(channel:string,id:number)=>"#chat/"+encodeURIComponent(channel)+"/"+id;
+function navigateToMessage(channel:string,id:number){
+  const hash=messageLink(channel,id);
+  if(location.hash===hash)window.dispatchEvent(new HashChangeEvent("hashchange"));
+  else location.hash=hash;
+}
+function MessageLinkChip({target,channel}:{target:MessageLinkTarget;channel?:Channel}){
+  const Icon=channel?.kind==="voice"?Volume2:channel?.kind==="private"?LockKeyhole:channel?.kind==="dm"?MessageSquare:channel?Hash:Link2;
+  return <a className="message-link-chip" href={messageLinkPath(target.channel,target.id)}
+    aria-label={channel?"Jump to a message in "+channel.name:"Open message link"} onClick={event=>{
+      if(event.ctrlKey||event.metaKey||event.shiftKey||event.altKey)return;
+      event.preventDefault();navigateToMessage(target.channel,target.id);
+    }}>
+    <Icon size={17} aria-hidden="true"/><span>{channel?.name??"Message link"}</span>
+    <ChevronRight size={12} aria-hidden="true"/><MessageCircle size={15} aria-hidden="true"/>
+  </a>;
+}
 function focusMessage(target:HTMLElement){
   target.focus({preventScroll:true});
   target.scrollIntoView({block:"center",behavior:matchMedia("(prefers-reduced-motion: reduce)").matches?"auto":"smooth"});
@@ -84,7 +101,7 @@ function pendingMessage(person:Person,channel:string,body:string,reply:Message|n
   const now=Date.now();
   return {id:-now-Math.random(),channel,uid:person.id,name:person.name,username:person.username,has_avatar:!!person.avatar,body,created:now,deleted:0,pinned:0,reply:reply?.id,replyPreview:reply&&replyPreview(reply)};
 }
-const MessageRow=memo(function MessageRow({m,channel,previous,replyTo=m.replyPreview,me,username,admin,menuOpen,unreadStart=false,actions}:{m:Message;channel:string;previous?:Message;replyTo?:ReplyPreview|null;me?:string;username?:string;admin:boolean;menuOpen:boolean;unreadStart?:boolean;actions:RowActions}){
+const MessageRow=memo(function MessageRow({m,channel,links,previous,replyTo=m.replyPreview,me,username,admin,menuOpen,unreadStart=false,actions}:{m:Message;channel:string;links:LinkContext;previous?:Message;replyTo?:ReplyPreview|null;me?:string;username?:string;admin:boolean;menuOpen:boolean;unreadStart?:boolean;actions:RowActions}){
   const newDay=!previous||day(previous.created)!==day(m.created);
   const joined=!unreadStart&&!m.reply&&!!previous&&!newDay&&previous.uid===m.uid&&m.created-previous.created<240000;
   const reacts=Object.entries(m.reactions?JSON.parse(m.reactions) as Record<string,number>:{});
@@ -110,7 +127,7 @@ const MessageRow=memo(function MessageRow({m,channel,previous,replyTo=m.replyPre
       {!joined&&<Avatar name={m.name} uid={m.uid} has={m.has_avatar}/>}
       <div className="message-content">
         {!joined&&<div className="byline"><strong title={"@"+m.username}>{m.name}</strong><time dateTime={new Date(m.created).toISOString()} title={new Date(m.created).toLocaleString()}>{clock(m.created)}</time>{!!m.edited&&<span className="edited">(edited)</span>}{!!m.pinned&&<span className="tag">Pinned</span>}<span className="handle">@{m.username}</span></div>}
-        {m.body&&<div className="text-body">{markdown(m.body,username)}{!!m.edited&&joined&&<small> (edited)</small>}</div>}
+        {m.body&&<div className="text-body">{markdown(m.body,links,username)}{!!m.edited&&joined&&<small> (edited)</small>}</div>}
         {m.attachment&&<Attachment message={m}/>}
         {reacts.length>0&&<div className="reaction-row">{reacts.map(([emoji,count])=><button key={emoji} type="button" aria-pressed={mine.has(emoji)} aria-label={emoji+" "+count+(mine.has(emoji)?", you reacted":"")} onClick={()=>void actions.action("react",m,{emoji,remove:mine.has(emoji)})}>{emoji} {count}</button>)}</div>}
       </div>
@@ -125,6 +142,7 @@ const MessageRow=memo(function MessageRow({m,channel,previous,replyTo=m.replyPre
         <button role="menuitem" onClick={()=>{close();actions.reply(m);}}><Reply size={16}/>Reply</button>
         {mineMessage&&m.body&&<button role="menuitem" onClick={()=>{close();actions.edit(m);}}><Pencil size={16}/>Edit message</button>}
         {m.body&&<button role="menuitem" onClick={()=>{close();void navigator.clipboard?.writeText(m.body).catch(()=>{});}}><Copy size={16}/>Copy text</button>}
+        {m.id>0&&<button role="menuitem" onClick={()=>{close();actions.copyLink(channel,m.id);}}><Link2 size={16}/>Copy message link</button>}
         {(mineMessage||admin)&&<button role="menuitem" onClick={()=>{close();void actions.action("pin",m);}}><Pin size={16}/>{m.pinned?"Unpin":"Pin"}</button>}
         {!mineMessage&&<button role="menuitem" onClick={()=>{close();actions.report(m);}}><Flag size={16}/>Report</button>}
         {(mineMessage||admin)&&<button role="menuitem" className="danger" onClick={()=>{close();actions.remove(m);}}><Trash2 size={16}/>Delete message</button>}
@@ -135,17 +153,20 @@ const MessageRow=memo(function MessageRow({m,channel,previous,replyTo=m.replyPre
 function IconButton({label,children,onClick,active=false,disabled=false,danger=false}:{label:string;children:ReactNode;onClick:()=>void;active?:boolean;disabled?:boolean;danger?:boolean}){
   return <button type="button" className={"icon-button"+(active?" active":"")+(danger?" danger":"")} title={label} aria-label={label} aria-pressed={active} onClick={onClick} disabled={disabled}>{children}</button>;
 }
-function inline(text:string,username?:string) {
+function inline(text:string,links:LinkContext,username?:string) {
   const renderMentions=(prose:string)=>splitMentions(prose).map((part,i)=>i%2?
     <span key={i} className={"mention"+(part.slice(1).toLowerCase()===username?" mention-self":"")}>{part}</span>:part);
+  const renderProse=(prose:string)=>prose.includes("://")?splitMessageLinks(prose,links.origin).map((part,i)=>part.target?
+    <MessageLinkChip key={i} target={part.target} channel={links.channels.get(part.target.channel)}/>:
+    <Fragment key={i}>{renderMentions(part.text)}</Fragment>):renderMentions(prose);
   return text.split(inlineMarkdown).map((part,i)=>{
-    if(i%2===0)return <Fragment key={i}>{renderMentions(part)}</Fragment>;
-    if(part.startsWith("**"))return <strong key={i}>{renderMentions(part.slice(2,-2))}</strong>;
-    if(part.startsWith("_"))return <em key={i}>{renderMentions(part.slice(1,-1))}</em>;
+    if(i%2===0)return <Fragment key={i}>{renderProse(part)}</Fragment>;
+    if(part.startsWith("**"))return <strong key={i}>{renderProse(part.slice(2,-2))}</strong>;
+    if(part.startsWith("_"))return <em key={i}>{renderProse(part.slice(1,-1))}</em>;
     return <code key={i}>{part.slice(1,-1)}</code>;
   });
 }
-function markdown(text:string,username?:string){
+function markdown(text:string,links:LinkContext,username?:string){
   const parts=text.split(/\x60\x60\x60/);
   return parts.map((part,i)=>{
     // Newlines touching a code fence belong to the fence, not to the text around it.
@@ -153,7 +174,7 @@ function markdown(text:string,username?:string){
       let prose=part;
       if(i>0)prose=prose.replace(/^\r?\n/,"");
       if(i<parts.length-1)prose=prose.replace(/\r?\n$/,"");
-      return prose&&<span key={i}>{inline(prose,username)}</span>;
+      return prose&&<span key={i}>{inline(prose,links,username)}</span>;
     }
     const start=part.indexOf("\n");
     const body=(start<0?part:part.slice(start+1)).replace(/\r?\n$/,"");
@@ -493,6 +514,7 @@ export default function Community({localAuth=false}:{localAuth?:boolean}={}){
     edit:m=>rowHandlers.current.edit(m),
     menu:id=>setMenu(id),
     jump:id=>rowHandlers.current.jump(id),
+    copyLink:(channel,id)=>rowHandlers.current.copyLink(channel,id),
     remove:m=>rowHandlers.current.remove(m),
     report:m=>rowHandlers.current.report(m),
   }));
@@ -503,10 +525,14 @@ export default function Community({localAuth=false}:{localAuth?:boolean}={}){
     setMediaDevices(personId?{userId:personId,devices:loadMediaDevices(personId)}:undefined);
   },[personId]);
   const channel=space?.channels.find(c=>c.id===selected);
+  const [linkOrigin]=useState(()=>typeof window==="undefined"?"":window.location.origin);
+  const accessibleChannels=space?.channels;
+  const links=useMemo<LinkContext>(()=>({origin:linkOrigin,channels:new Map(accessibleChannels?.map(c=>[c.id,c]))}),[linkOrigin,accessibleChannels]);
   const mainStage=stage||channel?.kind==="voice";
   const voiceRoom=space?.channels.find(c=>c.id===(call?.channel??selected)&&c.kind==="voice");
-  const sidechatOpen=!!(mainStage&&voiceRoom&&sidechat===voiceRoom.id);
-  const chatChannel=mainStage?(sidechatOpen?voiceRoom:undefined):channel;
+  const sidechatRoom=mainStage?accessibleChannels?.find(c=>c.id===sidechat&&c.kind==="voice"&&(c.id===selected||c.id===voiceRoom?.id)):undefined;
+  const sidechatOpen=!!sidechatRoom;
+  const chatChannel=mainStage?sidechatRoom:channel;
   const chatId=chatChannel?.id??"";
   const draft=drafts[chatId]??"";
   const mention=mentionCursor?.channel===chatId&&mentionCursor.text===draft?mentionAtCursor(draft,mentionCursor.position):undefined;
@@ -547,20 +573,19 @@ export default function Community({localAuth=false}:{localAuth?:boolean}={}){
   useEffect(()=>{
     if(!space)return;
     const openLink=()=>{
-      const match=/^#chat\/([^/]+)\/([1-9]\d*)$/.exec(location.hash);
-      if(!match)return;
-      const link=space.channels.find(c=>encodeURIComponent(c.id)===match[1]);
-      const target=Number(match[2]);
-      if(!link||!Number.isSafeInteger(target))return;
+      const target=parseMessageLink(location.hash)??parseMessageQuery(new URLSearchParams(location.search).get("message"));
+      if(!target)return;
+      const link=space.channels.find(c=>c.id===target.channel);
+      if(!link){report("This message’s channel is unavailable.");return;}
       setFind("");setPinned(false);setSelected(link.id);
       if(link.server)setServer(link.server);
       setStage(link.kind==="voice");setSidechat(link.kind==="voice"?link.id:"");
-      setPermalink({channel:link.id,target});
+      setPermalink({channel:link.id,target:target.id});
     };
     if(!openedInitialLink.current){openedInitialLink.current=true;openLink();}
     window.addEventListener("hashchange",openLink);
     return ()=>window.removeEventListener("hashchange",openLink);
-  },[space]);
+  },[space,report]);
   const load=useCallback(async(id:string,search:string,pins:boolean)=>{
     const params=new URLSearchParams({channel:id,mentions:"1"});
     if(search)params.set("search",search);
@@ -588,7 +613,7 @@ export default function Community({localAuth=false}:{localAuth?:boolean}={}){
   async function jumpTo(id:number,loadContext=false){
     const sequence=++jumpRequest.current;
     const target=document.getElementById("msg-"+id);
-    if(target&&!loadContext){stick.current=false;focusMessage(target);return;}
+    if(target&&(!loadContext||jumpHistory?.target===id)){stick.current=false;focusMessage(target);return;}
     try{
       const params=new URLSearchParams({channel:chatId,around:String(id)});
       const {messages:context}=await request<Pick<History,"messages">>("history?"+params);
@@ -639,9 +664,7 @@ export default function Community({localAuth=false}:{localAuth?:boolean}={}){
             const notification=new Notification(notice.channelName,{body:notice.sender+(notice.mentioned?" mentioned you":" replied to you"),tag:"ra-"+notice.id});
             notification.onclick=()=>{
               window.focus();
-              const hash=messageLink(notice.channel,notice.id);
-              if(location.hash===hash)window.dispatchEvent(new HashChangeEvent("hashchange"));
-              else location.hash=hash;
+              navigateToMessage(notice.channel,notice.id);
               notification.close();
             };
           }
@@ -897,6 +920,12 @@ export default function Community({localAuth=false}:{localAuth?:boolean}={}){
       pick:m=>setPicker(m),
       edit:m=>{setPicker(null);setReply(null);setEdit(m);setDraft(m.body);draftInput.current?.focus();},
       jump:(id,loadContext)=>void jumpTo(id,loadContext),
+      copyLink:async(channel,id)=>{
+        try{
+          await navigator.clipboard.writeText(location.origin+messageLinkPath(channel,id));
+          setToast("Message link copied.");
+        }catch{report("Could not copy the message link.");}
+      },
       remove:async m=>{
         const answer=await confirmAction({title:"Delete message",body:"This removes the message for everyone. It can't be undone.",action:"Delete message",danger:true});
         if(answer.ok)void action("delete",m);
@@ -1131,7 +1160,7 @@ export default function Community({localAuth=false}:{localAuth?:boolean}={}){
         onDragLeave={e=>{if(!e.currentTarget.contains(e.relatedTarget as Node))setDragging(false);}}
         onDrop={e=>{setDragging(false);const list=Array.from(e.dataTransfer.files);if(chatChannel&&list.length){e.preventDefault();stageFiles(list);}}}>
         {dragging&&<div className="drop-zone" aria-hidden="true"><Paperclip size={28}/><b>Drop to attach to #{chatChannel?.name}</b></div>}
-        {sidechatOpen&&<header className="sidechat-header"><h2>{voiceRoom?.name} sidechat</h2><IconButton label="Close sidechat" onClick={()=>setSidechat("")}><X size={17}/></IconButton></header>}
+        {sidechatOpen&&<header className="sidechat-header"><h2>{sidechatRoom.name} sidechat</h2><IconButton label="Close sidechat" onClick={()=>setSidechat("")}><X size={17}/></IconButton></header>}
         {viewingHistory&&<button type="button" className="history-return" onClick={closeJumpHistory}>
           <ArrowDown size={15}/>{find?"Back to search results":pinned?"Back to pinned messages":"Back to latest messages"}
         </button>}
@@ -1143,10 +1172,10 @@ export default function Community({localAuth=false}:{localAuth?:boolean}={}){
           {!viewingHistory&&hasMore&&bounded.length>=50&&<button className="older" onClick={earlier}>Load earlier messages</button>}
           {!bounded.length&&chatId&&ready!==chatId&&<div className="skeleton-feed" aria-label="Loading messages">{[72,48,90,60,36].map((w,i)=><div key={i} className="skeleton-message"><span className="skeleton avatar-skel"/><div><span className="skeleton" style={{width:"18%"}}/><span className="skeleton" style={{width:w+"%"}}/></div></div>)}</div>}
           {!bounded.length&&!(chatId&&ready!==chatId)&&<div className="blank"><span className="empty-icon">{sidechatOpen?<MessageSquare size={26}/>:<Hash size={26}/>}</span><h2>{!chatChannel?(emptyServer?"No channels yet":"Welcome to RaRRcord"):find?"No matching messages":pinned?"No pinned messages":chatChannel.name}</h2>{(!chatId||ready===chatId)&&<p>{!chatChannel?(emptyServer?"This server has no channels you can open.":"Choose a channel to get started."):find?"Try another search.":pinned?"Pinned messages will appear here.":"Start the conversation."}</p>}{!chatChannel&&emptyServer&&admin&&<button className="primary" onClick={()=>openAdmin("Servers")}>Manage channels</button>}</div>}
-          {bounded.map((m,i)=><MessageRow key={m.id} m={m} channel={chatId} previous={bounded[i-1]} replyTo={m.reply?byId.get(m.reply):undefined}
+          {bounded.map((m,i)=><MessageRow key={m.id} m={m} channel={chatId} links={links} previous={bounded[i-1]} replyTo={m.reply?byId.get(m.reply):undefined}
             me={personId} username={person?.username} admin={person?.role==="admin"} menuOpen={menu===m.id} unreadStart={!viewingHistory&&unreadFrom?.channel===chatId&&unreadFrom.id===m.id} actions={rowActions}/>)}
           {!viewingHistory&&ready===chatId&&!find&&!pinned&&outbox.filter(p=>p.channel===chatId).map((p,i,list)=><div key={p.id} className="pending-message" inert aria-label="Sending">
-            <MessageRow m={p} channel={chatId} previous={i?list[i-1]:bounded.at(-1)} replyTo={p.reply?byId.get(p.reply):undefined} me={personId} username={person?.username} admin={false} menuOpen={false} actions={rowActions}/>
+            <MessageRow m={p} channel={chatId} links={links} previous={i?list[i-1]:bounded.at(-1)} replyTo={p.reply?byId.get(p.reply):undefined} me={personId} username={person?.username} admin={false} menuOpen={false} actions={rowActions}/>
           </div>)}
         </div></div>
         {unseen>0&&<button type="button" className="jump-present" onClick={()=>{if(feed.current){stick.current=true;feed.current.scrollTop=feed.current.scrollHeight;}setAwayFrom(null);}}>{unseen===1?"1 new message":unseen+" new messages"}<ArrowDown size={15}/></button>}

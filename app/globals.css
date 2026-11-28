@@ -210,6 +210,10 @@ input[type=file]{max-width:100%}
 .syntax{color:var(--accent-text)}
 .mention{padding:0 .2em;border-radius:4px;background:#5865f233;color:#d6d9ff;font-weight:600}
 .mention-self{background:#f0b23236;color:#ffdc91}
+.message-link-chip{display:inline-flex;align-items:center;gap:.32em;max-width:100%;padding:2px 6px;border-radius:var(--r-sm);background:#5865f233;color:#d6d9ff;font-weight:600;text-decoration:none;vertical-align:middle}
+.message-link-chip:is(:hover,:focus-visible){background:#5865f24d;color:#f2f3ff}
+.message-link-chip span{min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.message-link-chip svg{flex:none}
 .message.is-reply{border-radius:var(--r-sm);background:#5865f20b}
 .message.is-reply:is(:hover,:focus-within,.menu-open){background:#5865f21a}
 .message.for-you{background:#f0b23214;box-shadow:inset 3px 0 var(--yellow)}

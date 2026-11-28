@@ -17,7 +17,7 @@ function fixture() {
   return {sqlite,env:{DB,RARRCORD_AUTH:'local',RARRCORD_PUBLIC_ORIGIN:origin,RARRCORD_LOCAL_OWNER:'admin',RARRCORD_OWNER_EMAIL:'admin@rarrcord.invalid',RARRCORD_OWNER_CODE:'owner-'.repeat(6),RARRCORD_REGISTRATION_CODE:'member-'.repeat(6)}};
 }
 const password='a very long password';
-const authRequest=(data, cookie='', site=origin)=>new Request('http://internal/signin-with-chatgpt',{method:'POST',headers:{origin:site,'content-type':'application/x-www-form-urlencoded',cookie},body:new URLSearchParams(data)});
+const authRequest=(data, cookie='', site=origin, returnTo)=>new Request('http://internal/signin-with-chatgpt'+(returnTo?'?return_to='+encodeURIComponent(returnTo):''),{method:'POST',headers:{origin:site,'content-type':'application/x-www-form-urlencoded',cookie},body:new URLSearchParams(data)});
 const cookies=r=>r.headers.getSetCookie().map(s=>s.split(';')[0]);
 async function call(env,path,body,cookie='',extra={}) {
   const req=new Request('http://internal/api/ra/'+path,{method:body===undefined?'GET':'POST',headers:{origin,'content-type':'application/json',cookie,...extra},body:body===undefined?undefined:JSON.stringify(body)});
@@ -25,11 +25,12 @@ async function call(env,path,body,cookie='',extra={}) {
 }
 test('local admin bootstrap, member approval, credential security and logout',async()=>{
   const {sqlite,env}=fixture();
-  const register=(username,code)=>localAuthRoute(authRequest({action:'register',username,password,code}),env);
+  const register=(username,code,returnTo)=>localAuthRoute(authRequest({action:'register',username,password,code},'',origin,returnTo),env);
   assert.equal((await register('admin',env.RARRCORD_REGISTRATION_CODE)).status,403);
   assert.equal((await register('friend',env.RARRCORD_REGISTRATION_CODE)).status,403);
   assert.equal((await call(env,'session',undefined,'',{'x-rarrcord-user-id':'local:admin','oai-authenticated-user-id':'admin','oai-authenticated-user-email':'admin@rarrcord.invalid'})).status,401);
-  const admin=await register('admin',env.RARRCORD_OWNER_CODE); assert.equal(admin.status,303);
+  const admin=await register('admin',env.RARRCORD_OWNER_CODE,'/?message=general%2F42'); assert.equal(admin.status,303);
+  assert.equal(admin.headers.get('location'),'/?message=general%2F42');
   const idCookie=cookies(admin)[0]; assert.match(admin.headers.getSetCookie()[0],/HttpOnly; Secure; SameSite=Strict/);
   assert.notEqual(sqlite.prepare('SELECT password_hash FROM local_accounts').get().password_hash,password);
   assert.equal((await call(env,'enroll',{username:'other'},idCookie)).status,400);
@@ -47,7 +48,8 @@ test('local admin bootstrap, member approval, credential security and logout',as
   assert.equal((await localAuthRoute(authRequest({action:'login',username:'friend',password},'','https://evil.example'),env)).status,403);
   const logout=await call(env,'logout',{},both); assert.equal(logout.status,200); assert.equal(cookies(logout).length,2);
   assert.equal((await call(env,'session',undefined,both)).status,401);
-  const login=await localAuthRoute(authRequest({action:'login',username:'friend',password}),env); assert.equal(login.status,303);
+  const login=await localAuthRoute(authRequest({action:'login',username:'friend',password},'',origin,'//other.example/?message=general%2F42'),env); assert.equal(login.status,303);
+  assert.equal(login.headers.get('location'),'/');
   const next=cookies(login)[0];
   assert.equal((await call(env,'admin',{action:'revoke',target:'local:friend'},ownerCookie)).status,200);
   assert.equal((await call(env,'session',undefined,next)).status,401);
