@@ -9,6 +9,7 @@ import ModerateMember, { timeLeft } from "./moderate-member";
 import { isImage, typingText, uploadWithProgress } from "./upload";
 import { cleanAnnouncements, joinAnnouncement, playVoiceCue, speakAnnouncement } from "./voice-sounds";
 import { canBoost, route, setGain, type Route, loadScreenPreview, loadVolumes, maxVolume, saveScreenPreview, setVolume, streamVolumeKey } from "./user-volume";
+import { accountPreferences, loadMediaDevices, saveMediaDevices, type MediaDevicePreferences } from "./media-device-preferences";
 import { microphoneConstraints, preloadVoice, processVoice, suppressionMode, suppressionModes, type VoiceProcessor } from "./noise-suppression";
 import { VoiceSession, codecs, iceServers, type Call, type Feed, type Metrics, type Participant, type Signal } from "./rtc";
 import { request, defaults, qualities, appLogoUrl, serverPictureUrl, serverBackground, type Channel, type Message, type Person, type Preferences, type Server } from "./ra-client";
@@ -246,7 +247,7 @@ function Diagnostics({call,latency,errors}:{call:Call|null;latency:number|null;e
   </div>;
 }
 const settingsTabs=[["profile","Profile"],["voice","Voice and video"],["screen","Screen share"],["app","Notifications"]] as const;
-function UserSettings({person,prefs,limit,save,report,signOut,localAuth}:{localAuth:boolean;person:Person;prefs:Preferences;limit:number;save:()=>void;report:(x:string)=>void;signOut:()=>void}){
+function UserSettings({person,prefs,limit,save,report,signOut,localAuth}:{localAuth:boolean;person:Person;prefs:Preferences;limit:number;save:(devices:MediaDevicePreferences)=>void;report:(x:string)=>void;signOut:()=>void}){
   const [tab,setTab]=useState<(typeof settingsTabs)[number][0]>("profile");
   const [picture,setPicture]=useState("");
   const [uploading,setUploading]=useState(false);
@@ -268,7 +269,14 @@ function UserSettings({person,prefs,limit,save,report,signOut,localAuth}:{localA
   };
   useEffect(()=>{void list(); return endTest;},[]);
   const change=<K extends keyof Preferences>(key:K,value:Preferences[K])=>setForm(f=>({...f,[key]:value}));
-  const device=(label:string,key:"input"|"output"|"camera",kind:MediaDeviceKind)=><label>{label}<select value={form[key]} onChange={e=>change(key,e.target.value)}><option value="">System default</option>{devices.filter(d=>d.kind===kind&&d.deviceId).map((d,i)=><option key={d.deviceId} value={d.deviceId}>{d.label||label+" "+(i+1)}</option>)}</select></label>;
+  const device=(label:string,key:keyof MediaDevicePreferences,kind:MediaDeviceKind)=>{
+    const options=devices.filter(d=>d.kind===kind&&d.deviceId);
+    return <label>{label}<select value={form[key]} onChange={e=>change(key,e.target.value)}>
+      <option value="">System default</option>
+      {form[key]&&!options.some(d=>d.deviceId===form[key])&&<option value={form[key]}>Previously selected device</option>}
+      {options.map((d,i)=><option key={d.deviceId} value={d.deviceId}>{d.label||label+" "+(i+1)}</option>)}
+    </select></label>;
+  };
   async function testMic(){
     if(testing.current)return;
     testing.current=true;
@@ -302,7 +310,17 @@ function UserSettings({person,prefs,limit,save,report,signOut,localAuth}:{localA
   useEffect(()=>()=>{if(picture)URL.revokeObjectURL(picture);},[picture]);
   return <form className="settings-form settings-tabs" onInvalidCapture={()=>setTab("profile")} onSubmit={async(e)=>{
     e.preventDefault();
-    try{await request("profile",{...(localAuth?{}:{name}),status,prefs:{...form,joinAnnouncements:cleanAnnouncements(form.joinAnnouncements)}});save();}catch(e){report((e as Error).message);}
+    const devices={input:form.input,output:form.output,camera:form.camera};
+    const account=accountPreferences(form);
+    try{
+      if(name!==person.name||status!==person.status||JSON.stringify(account)!==JSON.stringify(accountPreferences(prefs))){
+        await request("profile",{...(localAuth?{}:{name}),status,prefs:{...account,joinAnnouncements:cleanAnnouncements(form.joinAnnouncements)}});
+      }
+      if(devices.input!==prefs.input||devices.output!==prefs.output||devices.camera!==prefs.camera){
+        saveMediaDevices(person.id,devices);
+      }
+      save(devices);
+    }catch(e){report((e as Error).message);}
   }}>
     <nav className="tabs" role="tablist" aria-label="Settings sections">{settingsTabs.map(([id,label])=><button type="button" role="tab" key={id} aria-selected={tab===id} className={tab===id?"active":""} onClick={()=>setTab(id)}>{label}</button>)}</nav>
     <fieldset hidden={tab!=="profile"}><legend>Profile</legend>{localAuth?<p>Display name: {person.username}</p>:<label>Display name<input autoComplete="off" required maxLength={40} value={name} onChange={e=>setName(e.target.value)}/></label>}
@@ -441,6 +459,11 @@ export default function Community({localAuth=false}:{localAuth?:boolean}={}){
     report:m=>rowHandlers.current.report(m),
   }));
   const person=auth?.user;
+  const personId=person?.id;
+  const [mediaDevices,setMediaDevices]=useState<{userId:string;devices:MediaDevicePreferences}>();
+  useEffect(()=>{
+    setMediaDevices(personId?{userId:personId,devices:loadMediaDevices(personId)}:undefined);
+  },[personId]);
   const channel=space?.channels.find(c=>c.id===selected);
   const mainStage=stage||channel?.kind==="voice";
   const voiceRoom=space?.channels.find(c=>c.id===(call?.channel??selected)&&c.kind==="voice");
@@ -451,7 +474,7 @@ export default function Community({localAuth=false}:{localAuth?:boolean}={}){
   const gif=gifDraft?.channel===chatId?gifDraft.file:null;
   const files=staged.filter(s=>s.channel===chatId);
   const setDraft=(text:string)=>setDrafts(previous=>({...previous,[chatId]:text}));
-  const prefs={...defaults,...space?.prefs};
+  const prefs={...defaults,...accountPreferences(space?.prefs??{}),...(mediaDevices?.userId===personId&&mediaDevices?.devices)};
   const limit=Number(space?.settings.find(v=>v.key==="bitrate")?.value??0);
   const report=useCallback((message:string)=>{
     const text=friendlyError(message);
@@ -1034,7 +1057,7 @@ export default function Community({localAuth=false}:{localAuth?:boolean}={}){
     <div className="toast-region" role="status" aria-live="polite">{toast&&<div className="toast">{toast}<IconButton label="Dismiss" onClick={()=>setToast("")}><X size={16}/></IconButton></div>}</div>
     <ConfirmHost/>
     {modal&&<Modal key={modal} wide={modal==="admin"} className={modal==="switch"?"switch-dialog":""} onClose={()=>setModal("")} title={modal==="moderate"?"Moderate "+(space?.people.find(p=>p.id===moderating)?.name??"member"):({admin:"Administration",settings:"User settings",diagnostics:"Connection diagnostics",dm:"Direct message",help:"RaRRcord help",switch:"Jump to"} as Record<string,string>)[modal]}>
-      {modal==="settings"&&person&&<><UserSettings localAuth={localAuth} person={person} prefs={prefs} limit={limit} save={()=>{void refresh();void refreshAuth();setModal("");report(call?"Settings saved. Rejoin the call to apply media changes.":"Settings saved.");}} report={report} signOut={logout}/></>}
+      {modal==="settings"&&person&&<><UserSettings key={person.id} localAuth={localAuth} person={person} prefs={prefs} limit={limit} save={devices=>{setMediaDevices({userId:person.id,devices});void refresh();void refreshAuth();setModal("");report(call?"Settings saved. Rejoin the call to apply media changes.":"Settings saved.");}} report={report} signOut={logout}/></>}
       {modal==="diagnostics"&&<Diagnostics call={call} latency={latency} errors={errors}/>}
       {modal==="moderate"&&space&&(()=>{
         const target=space.people.find(p=>p.id===moderating);
