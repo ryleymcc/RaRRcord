@@ -10,7 +10,7 @@ import { cleanAnnouncements, joinAnnouncement, playVoiceCue, speakAnnouncement }
 import { canBoost, route, setGain, type Route, loadScreenPreview, loadVolumes, maxVolume, saveScreenPreview, setVolume, streamVolumeKey } from "./user-volume";
 import { microphoneConstraints, processVoice, suppressionMode, suppressionModes, type VoiceProcessor } from "./noise-suppression";
 import { VoiceSession, codecs, type Call, type Feed, type Metrics, type Participant, type Signal } from "./rtc";
-import { request, defaults, qualities, serverPictureUrl, type Channel, type Message, type Person, type Preferences, type Server } from "./ra-client";
+import { request, defaults, qualities, serverPictureUrl, serverBackground, type Channel, type Message, type Person, type Preferences, type Server } from "./ra-client";
 import Admin from "./ra-admin";
 import { DiagnosticCharts, WebRtcInternals } from "./diagnostic-charts";
 import { diagnosticSample, type DiagnosticSample } from "./diagnostic-data";
@@ -748,6 +748,8 @@ export default function Community({localAuth=false}:{localAuth?:boolean}={}){
     return rooms.filter(r=>r.channel===id).map(r=>({uid:r.uid,name:r.name,avatar:!!r.has_avatar,live:!!r.screen,cam:!!r.cam,speaking:false})).sort((a,b)=>a.name.localeCompare(b.name)||a.uid.localeCompare(b.uid));
   };
   const currentServer=space?.servers.find(s=>s.id===server);
+  // Direct messages belong to no server, so they keep the plain chat colour.
+  const backdrop=channel?.kind==="dm"?undefined:serverBackground(currentServer);
   const callTitle=space?.channels.find(c=>c.id===call?.channel)?.name;
   const feeds=call?.feeds.filter(f=>f.kind!=="voice")??[];
   const screens=feeds.filter(f=>f.kind==="screen");
@@ -796,7 +798,7 @@ export default function Community({localAuth=false}:{localAuth?:boolean}={}){
         <IconButton label="User settings" onClick={()=>setModal("settings")}><Settings size={18}/></IconButton>
       </footer>
     </aside>
-    <main className="conversation">
+    <main className={"conversation"+(backdrop?" has-backdrop":"")} style={backdrop?{background:backdrop}:undefined}>
       <header className="topbar">
         <span className="mobile-toggle"><IconButton label="Toggle navigation" active={mobile} onClick={()=>{setMembersSheet(false);setMobile(!mobile);}}><Menu size={20}/></IconButton></span>
         <div className="location-title">{mainStage?<AudioLines size={21}/>:<Hash size={22}/>}<h1>{mainStage?callTitle??channel?.name??"Voice room":channel?.name??"Community"}</h1></div>

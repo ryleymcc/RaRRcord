@@ -1,6 +1,7 @@
 import { EMAIL_HEADER, ID_HEADER, signOutPath } from "./identity.ts";
 import { localOrigin, localLogout } from "./local-auth.ts";
 import { allow, dailyUploadBytes, readLimits } from "./limits.ts";
+import { backgroundPresets } from "../lib/backgrounds.ts";
 
 type Value = string | number | null;
 type User = { id:string; username:string; name:string; state:string; role:string; status:string; seen:number; avatar:string|null; epoch:number; prefs:string };
@@ -103,7 +104,7 @@ async function route(request:Request, env:Cloudflare.Env):Promise<Response> {
   const validSession=async (account:User)=> !!sessionKey && !!await one(
     "SELECT token FROM sessions WHERE token=? AND uid=? AND epoch=? AND expires>?",sessionKey,id,account.epoch,now);
   const audit=(action:string, detail:string)=>sql("INSERT INTO audit(uid,action,detail,time) VALUES(?,?,?,?)",id,action,detail,now);
-  const upload = path==="upload" || path==="avatar" || path==="servericon";
+  const upload = path==="upload" || path==="avatar" || path==="servericon" || path==="serverbackground";
   let body:Input={};
   if (write && !upload) {
     if (!request.headers.get("content-type")?.startsWith("application/json")) deny(415,"Expected JSON.");
@@ -197,7 +198,7 @@ async function route(request:Request, env:Cloudflare.Env):Promise<Response> {
   if (path==="workspace" && !write) {
     return json({
       // "picture" is only a short version tag for cache busting; the storage key itself stays on the server.
-      servers:await all("SELECT s.id,s.name,s.icon,substr(s.picture,1,8) AS picture FROM servers s WHERE ?='admin' OR EXISTS (SELECT 1 FROM members WHERE server=s.id AND uid=?) ORDER BY name",account.role,id),
+      servers:await all("SELECT s.id,s.name,s.icon,substr(s.picture,1,8) AS picture,substr(s.background,1,8) AS background,s.background_fill,s.background_dim FROM servers s WHERE ?='admin' OR EXISTS (SELECT 1 FROM members WHERE server=s.id AND uid=?) ORDER BY name",account.role,id),
       channels:await all("SELECT c.*, (SELECT COUNT(*) FROM messages m WHERE m.channel=c.id AND m.deleted=0 AND m.uid<>? AND m.id>COALESCE((SELECT mid FROM reads WHERE uid=? AND channel=c.id),0)) unread FROM channels c WHERE "+channelAccess("c")+" ORDER BY position,c.name",id,id,...access),
       people:await all("SELECT u.id,u.name,u.username,u.role,u.avatar IS NOT NULL AS avatar,CASE WHEN u.seen<? THEN 'offline' ELSE u.status END status FROM users u WHERE u.state='approved' AND (u.id=? OR ?='admin' OR EXISTS (SELECT 1 FROM members a JOIN members b ON a.server=b.server WHERE a.uid=? AND b.uid=u.id)) ORDER BY u.name COLLATE NOCASE,u.id",now-25000,id,account.role,id),
       settings:await all("SELECT key,value FROM settings WHERE key IN ('bitrate','upload','stun')"),
@@ -300,7 +301,7 @@ async function route(request:Request, env:Cloudflare.Env):Promise<Response> {
     sockets[1].close(1000,"Probe complete");
     return new Response(null,{status:101,webSocket:sockets[0]});
   }
-  if ((path==="attachment" || path==="avatar" || path==="servericon") && !write) {
+  if ((path==="attachment" || path==="avatar" || path==="servericon" || path==="serverbackground") && !write) {
     if (!env.BUCKET) deny(503,"File storage unavailable.");
     const key=string(q.get("key"),100);
     let storageKey=key;
@@ -315,6 +316,11 @@ async function route(request:Request, env:Cloudflare.Env):Promise<Response> {
       const row=await one<{picture:string|null}>("SELECT s.picture FROM servers s WHERE s.id=? AND (?='admin' OR EXISTS (SELECT 1 FROM members WHERE server=s.id AND uid=?))",key,account.role,id);
       if (!row?.picture) deny(404,"Server picture unavailable.");
       storageKey=row.picture;
+    } else if (path==="serverbackground") {
+      // Same rule as the server picture: only people who can see the server can load its background.
+      const row=await one<{background:string|null}>("SELECT s.background FROM servers s WHERE s.id=? AND (?='admin' OR EXISTS (SELECT 1 FROM members WHERE server=s.id AND uid=?))",key,account.role,id);
+      if (!row?.background) deny(404,"Server background unavailable.");
+      storageKey=row.background;
     } else {
       const row=await one<{avatar:string|null}>("SELECT avatar FROM users WHERE id=? AND state='approved'",key);
       if (!row?.avatar) deny(404,"Avatar unavailable.");
@@ -343,12 +349,14 @@ async function route(request:Request, env:Cloudflare.Env):Promise<Response> {
     });
   }
   if (!write) deny(404,"Unknown operation.");
-  if (path==="upload" || path==="avatar" || path==="servericon") {
-    if (path==="servericon" && !admin) deny(403,"Administrator access required.");
+  if (path==="upload" || path==="avatar" || path==="servericon" || path==="serverbackground") {
+    // Server pictures and backgrounds are both per-server images that only administrators may change.
+    const serverImage=path==="servericon" || path==="serverbackground";
+    if (serverImage && !admin) deny(403,"Administrator access required.");
     await throttle(path,18);
     if (!env.BUCKET) deny(503,"File storage unavailable.");
     const config=await one<{value:string}>("SELECT value FROM settings WHERE key='upload'");
-    const limit=path!=="upload"?2097152:Math.min(Number(config?.value??8000000),20000000);
+    const limit=path==="serverbackground"?4194304:path!=="upload"?2097152:Math.min(Number(config?.value??8000000),20000000);
     // Without a length the whole body would be buffered before the size check below.
     const length=Number(request.headers.get("content-length"));
     if (!request.headers.has("content-length") || !Number.isSafeInteger(length)) deny(411,"Upload length required.");
@@ -360,8 +368,8 @@ async function route(request:Request, env:Cloudflare.Env):Promise<Response> {
     const file=data.get("file");
     if (!file || typeof file==="string" || !file.size || file.size>limit) deny(413,"File missing or too large.");
     const c=path==="upload"?await chan(string(data.get("channel"),64)):null;
-    const serverId=path==="servericon"?string(data.get("server"),64):"";
-    if (path==="servericon" && !await one("SELECT 1 FROM servers WHERE id=?",serverId)) deny(404,"Server unavailable.");
+    const serverId=serverImage?string(data.get("server"),64):"";
+    if (serverImage && !await one("SELECT 1 FROM servers WHERE id=?",serverId)) deny(404,"Server unavailable.");
     const gif=c && data.get("gif")==="1";
     const caption=gif?string(data.get("text")??"",8000,0):"";
     const reply=gif && data.has("reply")?number(data.get("reply")):null;
@@ -390,6 +398,10 @@ async function route(request:Request, env:Cloudflare.Env):Promise<Response> {
         const old=await one<{picture:string|null}>("SELECT picture FROM servers WHERE id=?",serverId);
         await db.batch([sql("UPDATE servers SET picture=? WHERE id=?",key,serverId),sql("INSERT INTO audit(uid,action,detail,time) VALUES(?,?,?,?)",id,"server_picture",serverId,now),tally]);
         if (old?.picture) await env.BUCKET.delete(old.picture);
+      } else if (path==="serverbackground") {
+        const old=await one<{background:string|null}>("SELECT background FROM servers WHERE id=?",serverId);
+        await db.batch([sql("UPDATE servers SET background=? WHERE id=?",key,serverId),sql("INSERT INTO audit(uid,action,detail,time) VALUES(?,?,?,?)",id,"server_background",serverId,now),tally]);
+        if (old?.background) await env.BUCKET.delete(old.background);
       } else {
         await db.batch([sql("UPDATE users SET avatar=? WHERE id=?",key,id),tally]);
         if (account.avatar) await env.BUCKET.delete(account.avatar);
@@ -591,10 +603,22 @@ async function route(request:Request, env:Cloudflare.Env):Promise<Response> {
       if (!row) deny(404,"Server unavailable.");
       commands.push(sql("UPDATE servers SET picture=NULL WHERE id=?",target));
       if (row.picture) files.push(row.picture);
+    } else if (action==="server_background") {
+      // Sets the colour or gradient and the dimming; removeImage also clears an uploaded image.
+      const row=await one<{background:string|null}>("SELECT background FROM servers WHERE id=?",target);
+      if (!row) deny(404,"Server unavailable.");
+      const fill=string(body.fill??"",24,0).toLowerCase();
+      if (fill && !/^#[0-9a-f]{6}$/.test(fill) && !backgroundPresets.some(p=>fill==="preset:"+p)) deny(400,"Choose a colour or one of the gradients.");
+      const dim=number(body.dim,60);
+      if (dim>90) deny(400,"Dimming must be between 0 and 90.");
+      const removeImage=body.removeImage===true;
+      commands.push(sql("UPDATE servers SET background_fill=?,background_dim=?"+(removeImage?",background=NULL":"")+" WHERE id=?",fill,dim,target));
+      if (removeImage && row.background) files.push(row.background);
     } else if (action==="server_delete") {
       await purge("SELECT id FROM channels WHERE server=?",target);
-      const old=await one<{picture:string|null}>("SELECT picture FROM servers WHERE id=?",target);
+      const old=await one<{picture:string|null;background:string|null}>("SELECT picture,background FROM servers WHERE id=?",target);
       if (old?.picture) files.push(old.picture);
+      if (old?.background) files.push(old.background);
       commands.push(sql("DELETE FROM channels WHERE server=?",target),sql("DELETE FROM members WHERE server=?",target),sql("DELETE FROM roles WHERE server=?",target),sql("DELETE FROM invites WHERE server=?",target),sql("DELETE FROM servers WHERE id=?",target));
     } else if (action==="channel") {
       const server=string(body.server,64), name=label(body.name,60), kind=string(body.kind,12);
